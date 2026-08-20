@@ -1,0 +1,7 @@
+# движок памяти ставится локально: ./scripts/cortex.sh engine
+.engine/
+
+# служебное
+.serena/
+__pycache__/
+.venv/

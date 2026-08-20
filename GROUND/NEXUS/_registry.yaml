@@ -1,0 +1,25 @@
+# Реестр Нексусов вашей организации. Источник истины для поля `nexus` в узлах:
+# значение frontmatter `nexus:` обязано быть одним из slug ниже, иначе гейт падает.
+#
+# source: default — из мастер-каталога PAF (4 минимальных + 3 опциональных);
+# source: custom  — ваш Нексус под конкретное решение (напр. sellers, supply-chain).
+#
+# owner: пока роль PAF. После заполнения GROUND/config.yaml замените роль на имя
+# человека из `team.roster` (или оставьте роль, если она делегирована Кортексу).
+#
+# Нексусы okr / pulse / jira здесь НЕ перечислены: их регистрирует движок
+# (`paf_index build`) в момент, когда появляется хребет OKR или эпизоды PULSE.
+
+nexus_types:
+  # --- минимальный набор PAF (инстанцируется всегда) ---
+  - {slug: product,   source: default, name: Нексус продукта,   owner: Product Engineer,   purpose: "идея продукта, фичи, Видение, гэп до Видения", onboarded: todo}
+  - {slug: customer,  source: default, name: Нексус потребителя, owner: Product Engineer,   purpose: "сегменты, работы (JTBD), боли, гипотеза mNSM", onboarded: todo}
+  - {slug: market,    source: default, name: Нексус рынка,      owner: Portfolio Manager,  purpose: "объём и динамика рынка, тренды, конкуренты, Ставки (Bets)", onboarded: todo}
+  - {slug: growth,    source: default, name: Нексус системы роста, owner: Growth Engineer, purpose: "каналы, модель монетизации, AI-COGS, рычаги (Lever) роста NPV", onboarded: todo}
+
+  # --- опциональные типы PAF (отключите те, что вам не нужны) ---
+  - {slug: ops-model, source: default, name: Нексус операционной модели, owner: Product Ops, purpose: "правила игры: принципы, кадренсы, граница делегирования, протокол памяти", onboarded: partial}
+  - {slug: company,   source: default, name: Нексус портфеля организации, owner: Portfolio Manager, purpose: "портфель продуктов и бизнес-юнитов, скаутинг на уровне компании", onboarded: todo}
+  - {slug: team,      source: default, name: Нексус организационной структуры, owner: Product Ops, purpose: "People Graph: кто, на какой роли, с кем связан, по каким вопросам полезен", onboarded: todo}
+
+  # --- ваши кастомные Нексусы: добавляйте через /paf-nexus-create ---

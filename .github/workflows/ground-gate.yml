@@ -1,0 +1,28 @@
+name: GROUND gate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Движок — flat-layout без явного packages в pyproject, pip install падает.
+      # Скрипт кладёт исходники в .engine/ и добавляет их в PYTHONPATH сам.
+      - name: Install PyYAML
+        run: pip install "PyYAML>=6.0"
+
+      # Тот же гейт, что запускает человек и ИИ-агент перед коммитом:
+      # схема config + registry, Node schema, висячие рёбра, дрейф свежести.
+      - name: Gate memory
+        run: ./scripts/cortex.sh gate
+
+      # Read-only отчёт: узлы, рёбра, Context Ripeness по Нексусам.
+      - name: Report (read-only)
+        run: ./scripts/cortex.sh report

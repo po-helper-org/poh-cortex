@@ -1,0 +1,44 @@
+# GROUND Vault — контекст вашей организации.
+# Схема: sa_documentation/ground_schema.md (poh-memory-engine).
+#
+# ЗАПОЛНИТЕ ЭТОТ ФАЙЛ ПЕРВЫМ. Быстрый путь: ./scripts/cortex.sh init
+# Плейсхолдеры в < > — обязательны к замене. Гейт проверяет product.slug
+# (ascii-slug) и team.roster.product_engineer (не может быть пустым).
+
+company: "<НАЗВАНИЕ ОРГАНИЗАЦИИ>"
+
+product:
+  name: "<НАЗВАНИЕ ПРОДУКТА>"
+  slug: your-product            # ascii-slug: [a-z0-9][a-z0-9-]*
+  idea: >
+    <ИДЕЯ ПРОДУКТА в 1–2 предложениях: кому и какую ценность несёт.>
+
+team:
+  size: 1
+  # roster — источник истины по ролям PAF. Значение: имя человека,
+  # "Cortex" (роль делегирована ИИ-агенту) или null (роли нет).
+  roster:
+    product_engineer: "<ФИО продуктового инженера>"   # обязателен
+    product_ops: Cortex
+    growth_engineer: null
+    portfolio_manager: null
+    discovery_launcher_pm: null
+    ai_ux_designer: null
+
+cortex:
+  phase_target: 2               # 1 = Claude Code читает vault, 2 = + RAG/индексация
+  ruflo_mcp: false
+  obsidian: true                # markdown + frontmatter как носитель графа
+
+onboarding:
+  status: init                  # init | in_progress | done
+  sources_ingested: []          # что реально прочитано: docs, интервью, аналитика
+  baseline_cr: {}               # Context Ripeness на входе, по Нексусам
+  onboarded_at: null
+
+nexus:
+  catalog: master               # мастер-каталог типов Нексусов (PAF)
+  custom_count: 0               # число Нексусов с source: custom в _registry.yaml
+
+created: 2026-01-01             # дата инициализации vault
+paf_step: 0                     # текущий шаг PAF: 0 = до Step-1-IDEA
