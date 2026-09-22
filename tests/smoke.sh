@@ -36,6 +36,12 @@ check "узел без источника отклонён"  2 node new --nexus 
 check "чужой Нексус отклонён"        2 node new --nexus nope --type feature --title x --source y
 check "висячее ребро отклонено"      2 node new --nexus product --type feature --title x --source y --satisfies kr-нет
 check "неизвестный тип отклонён"     2 node new --nexus product --type выдумка --title x --source y
+check "профили перечислены"          0 profiles
+check "очередь приёмки отвечает"     0 review
+check "резолвер отвечает"            0 resolve контракт агентов
+check "неизвестный профиль отклонён" 2 --as нет-такого profiles
+check "профиль не пишет в ядро"      2 --as po-gds node new --nexus team --type person --title X --source y --scope org
+check "профиль не пишет в чужую зону" 2 --as po-gds node new --nexus product --type feature --title X --source y --scope team:Live
 # Узел берём из самого vault: тест не должен знать чужое содержимое.
 NODE=$("$ROOT/bin/cortex" --root "$VAULT" ask память продукт цель --json 2>/dev/null \
   | python3 -c "import json,sys;d=json.load(sys.stdin)['answer_from'];print(next((x['node_id'] for x in d if x.get('node_id') and x.get('cp') is not None and x['cp']<9),''))" 2>/dev/null)
