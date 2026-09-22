@@ -902,11 +902,14 @@ def _setup_todo(cx: Cortex):
         if line.lstrip().startswith("#"):
             continue
         kv = _kv_split(line.strip())
-        if kv:
-            last_key = kv[0].strip()
+        # Двоеточие внутри плейсхолдера ключом не является.
+        key = kv[0].strip() if kv else None
+        if key and re.fullmatch(r"[A-Za-z_][\w.-]*", key):
+            last_key = key
+        else:
+            key = None
         if re.search(r"<[^<>]{2,}>", line):
-            # плейсхолдер может стоять в блочном значении — тогда имя ключа выше
-            name = (kv[0].strip() if kv else last_key) or "?"
+            name = key or last_key or "?"
             if name not in holes:
                 holes.append(name)
     if holes:
