@@ -31,15 +31,8 @@ scope:
 # Уровень определяется числом людей, пишущих в память, а не амбицией.
 maturity_level: 0
 
-# Жёсткость проверок гейта: error | warn | off.
-# Настраивается под контур сознательно, а не чтобы убрать красное.
-gate:
-  registry_drift: error       # папка Нексуса, не объявленная в реестре
-  unknown_node_type: error    # тип узла, не объявленный нигде
-  ripeness_drift: warn        # вычисляемое поле разошлось — нужен cortex refresh
-  unknown_agent: warn         # captured_by вне SCHEMA/agents.yaml
-  missing_provenance: warn    # узел без captured_by
-  agent_zone_drift: warn      # зона агента ссылается на несуществующий Нексус
+# Жёсткость проверок гейта живёт в GROUND/SCHEMA/gate.yaml: это правило
+# измерения, и менять его вправе только человек.
 
 onboarding:
   status: init                # init | in_progress | done

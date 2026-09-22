@@ -20,3 +20,4 @@
 # меняет все прошлые числа, поэтому она всегда ревьюится.
 /GROUND/SCHEMA/ladder.yaml      @curator
 /GROUND/SCHEMA/profiles.yaml    @curator
+/GROUND/SCHEMA/gate.yaml        @curator
