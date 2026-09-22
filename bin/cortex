@@ -629,6 +629,20 @@ def run_gate(cx: Cortex) -> list[Issue]:
                     add(Issue(sev, f"GROUND/NEXUS/{d.name}/", "Нексус не объявлен в _registry.yaml",
                               "объявите его: cortex nexus add " + d.name))
 
+    # --- зоны агентов против реестра ---
+    # Зона, указывающая на несуществующий Нексус, не сработает никогда:
+    # это остаток чужой конфигурации, а не защита.
+    for aid, z in cx.agent_zones().items():
+        for g in z["may_write"]:
+            m = re.match(r"GROUND/NEXUS/([a-z][a-z0-9-]*)/", str(g))
+            if m and m.group(1) not in cx.nexuses:
+                sev = _strict(cx, "agent_zone_drift", "WARN")
+                if sev:
+                    add(Issue(sev, "GROUND/SCHEMA/agents.yaml",
+                              f"агент {aid!r}: зона {g!r} указывает на Нексус "
+                              f"{m.group(1)!r}, которого нет в реестре",
+                              "объявите Нексус или уберите зону — этот glob не совпадёт никогда"))
+
     # --- узлы ---
     known_agents = set(cx.agent_zones())
     zones = cx.agent_zones()

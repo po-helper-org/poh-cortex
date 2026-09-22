@@ -39,6 +39,7 @@ gate:
   ripeness_drift: warn        # вычисляемое поле разошлось — нужен cortex refresh
   unknown_agent: warn         # captured_by вне SCHEMA/agents.yaml
   missing_provenance: warn    # узел без captured_by
+  agent_zone_drift: warn      # зона агента ссылается на несуществующий Нексус
 
 onboarding:
   status: init                # init | in_progress | done

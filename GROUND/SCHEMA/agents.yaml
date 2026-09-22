@@ -51,10 +51,13 @@ agents:
   - {id: "claude-code", class: deterministic, what: "агент над файлами и git"}
 
   # --- доменные навыки: зона сужается до их участка ---
+  # Навык, которому нужен не весь NEXUS, а несколько Нексусов, объявляет их
+  # явно. Слаги берутся из вашего _registry.yaml — навык не может писать в
+  # Нексус, которого нет, и гейт об этом скажет:
+  #   - {id: "skill:<имя>", class: curator,
+  #      may_write: ["GROUND/NEXUS/<нексус>/**", "GROUND/NEXUS/<нексус>/**"]}
   - {id: "skill:paf-onboard",  class: curator}
   - {id: "skill:paf-pulse",    class: curator, may_write: ["GROUND/PULSE/**"]}
-  - {id: "skill:radar-promote", class: curator,
-     may_write: ["GROUND/NEXUS/problem/**", "GROUND/NEXUS/system/**", "GROUND/NEXUS/ownership/**"]}
 
   # --- Hermes Agent: боты профиля. Пишут только в очередь ---
   - {id: "hermes:keeper",     class: collector, what: "Хранитель: ссылки, письма, прогоны; кого ждём"}
