@@ -2,6 +2,7 @@
 nexus: ops-model
 node_id: ops-agent-contract
 node_type: operating-model
+title: "Контракт агентов: кто считает, кто собирает, кто решает"
 kind: normative
 scope: org
 owner: Product Ops

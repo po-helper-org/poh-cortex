@@ -36,6 +36,8 @@ check "узел без источника отклонён"  2 node new --nexus 
 check "чужой Нексус отклонён"        2 node new --nexus nope --type feature --title x --source y
 check "висячее ребро отклонено"      2 node new --nexus product --type feature --title x --source y --satisfies kr-нет
 check "неизвестный тип отклонён"     2 node new --nexus product --type выдумка --title x --source y
+check "рост CP без источника отклонён" 2 node set ops-delegation-boundary --cp 9
+check "проверка узла отвечает"       0 node check ops-agent-contract
 
 echo
 if [ "$fail" = 0 ]; then

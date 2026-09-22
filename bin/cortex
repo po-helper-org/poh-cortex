@@ -727,12 +727,17 @@ class Index:
         return scored[:top]
 
 
+def _num(x):
+    """Целое показываем целым: 9, а не 9.0 — число читает человек."""
+    return int(x) if isinstance(x, float) and x.is_integer() else x
+
+
 def anchors(cx: Cortex, n: Node) -> dict:
     rip, p = cx.ripeness_of(n)
     return {
         "node_id": n.id, "title": n.title, "nexus": n["nexus"], "type": n["node_type"],
-        "scope": cx.scope_of(n), "owner": n["owner"], "cp": cx.cp_of(n),
-        "effective_cp": cx.effective_cp(n), "ripeness": rip,
+        "scope": cx.scope_of(n), "owner": n["owner"], "cp": _num(cx.cp_of(n)),
+        "effective_cp": _num(cx.effective_cp(n)), "ripeness": rip,
         "age_ratio": round(p, 2) if p is not None else None,
         "updated": str(n["updated"]), "sources": n["sources"] or [],
         "captured_by": n["captured_by"], "path": n.rel,
@@ -895,7 +900,7 @@ def cmd_ask(cx: Cortex, a):
         return 0
     print(bold(f"Знает: {len(hits)}"))
     for s, n in hits:
-        ecp, rip = cx.effective_cp(n), cx.ripeness_of(n)[0]
+        ecp, rip = _num(cx.effective_cp(n)), cx.ripeness_of(n)[0]
         mark = grn("●") if rip == "fresh" else (ylw("●") if rip == "ripening" else
                                                 (red("●") if rip else dim("○")))
         print(f"\n  {mark} {bold(n.title)}" + (dim(f"  [{n.id}]") if n.id else dim("  (без node_id)")))
@@ -1093,6 +1098,7 @@ NEW_TEMPLATE = """---
 
 
 def cmd_node(cx: Cortex, a):
+    a.id = a.id or getattr(a, "target", None)
     if a.action == "check":
         n = cx.by_id.get(a.id)
         if not n:
@@ -1121,7 +1127,7 @@ def cmd_node(cx: Cortex, a):
                 f"Обновите существующий или повторите с --force")
         ttl = a.ttl or (cx.schema["profiles"].get("change_rate") or {}).get(a.change_rate, {}).get("ttl_days", 90)
         fm = {
-            "nexus": a.nexus, "node_id": nid, "node_type": a.type,
+            "nexus": a.nexus, "node_id": nid, "node_type": a.type, "title": a.title,
             "kind": a.kind, "scope": a.scope or (cx.nexuses[a.nexus].get("scope") or "org"),
             "owner": a.owner or "Product Engineer",
             "cp": int(a.cp) if float(a.cp).is_integer() else a.cp,
@@ -1315,6 +1321,7 @@ def main(argv=None):
     p.add_argument("path", nargs="?")
     p = add("node", cmd_node, "контракт записи узла")
     p.add_argument("action", choices=["new", "check", "set"])
+    p.add_argument("target", nargs="?", help="node_id для check и set")
     p.add_argument("--id")
     p.add_argument("--title", default="")
     p.add_argument("--nexus")
