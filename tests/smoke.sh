@@ -42,6 +42,10 @@ check "резолвер отвечает"            0 resolve контракт 
 check "неизвестный профиль отклонён" 2 --as нет-такого profiles
 check "профиль не пишет в ядро"      2 --as po-gds node new --nexus team --type person --title X --source y --scope org
 check "профиль не пишет в чужую зону" 2 --as po-gds node new --nexus product --type feature --title X --source y --scope team:Live
+check "стыки считаются"              0 --as po-gds seams
+check "срез собирается"              0 --as po-gds pack --stdout
+check "срезы всех профилей"          0 pack --all
+check "срез без профиля отклонён"    2 pack --stdout
 # Узел берём из самого vault: тест не должен знать чужое содержимое.
 NODE=$("$ROOT/bin/cortex" --root "$VAULT" ask память продукт цель --json 2>/dev/null \
   | python3 -c "import json,sys;d=json.load(sys.stdin)['answer_from'];print(next((x['node_id'] for x in d if x.get('node_id') and x.get('cp') is not None and x['cp']<9),''))" 2>/dev/null)

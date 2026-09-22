@@ -19,6 +19,13 @@ jobs:
       - name: Свежесть пересчитана
         run: bin/cortex refresh --dry-run
 
+      # Срез — производный артефакт: он не должен отставать от памяти.
+      - name: Срезы профилей пересобраны
+        run: |
+          bin/cortex pack --all
+          git diff --exit-code --stat GROUND/_index/packs/ \
+            || { echo "::error::срезы устарели — выполните bin/cortex pack --all и закоммитьте"; exit 1; }
+
       - name: Дымовой тест инструмента
         run: tests/smoke.sh
 

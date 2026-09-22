@@ -462,6 +462,25 @@ class Cortex:
         w = p.get("writes") or []
         return [w] if isinstance(w, str) else list(w)
 
+    def profile_subs(self, pid: str) -> list:
+        """Подписки профиля: что из чужого для него горячее.
+        Это интерес профиля, а не свойство узла — один и тот же объект
+        для одного PO меняется ежедневно, для другого стабилен."""
+        raw = (self.profiles().get(pid) or {}).get("subscriptions") or []
+        raw = [raw] if isinstance(raw, str) else list(raw)
+        out = []
+        for item in raw:
+            s = str(item)
+            if s.startswith("nexus:"):
+                slug = s.split(":", 1)[1]
+                out += [n for n in self.nodes if n["nexus"] == slug and n.layer == "curated"]
+            elif s in self.by_id:
+                out.append(self.by_id[s])
+        return out
+
+    def in_my_zone(self, pid: str, node: Node) -> bool:
+        return self.scope_of(node) in self.profile_writes(pid) or pid in (node["shared_with"] or [])
+
     def core_curator(self) -> str:
         return (self.schema["agents"].get("core") or {}).get("curator") or ""
 
@@ -1199,11 +1218,14 @@ def cmd_node(cx: Cortex, a):
             fm["shared_with"] = list(a.shared_with)
         if a.aliases:
             fm["aliases"] = list(a.aliases)
-        if a.satisfies:
-            fm["satisfies"] = list(a.satisfies)
+        for field, vals in (("satisfies", a.satisfies), ("depends_on", a.depends_on),
+                            ("based_on", a.based_on)):
+            if vals:
+                fm[field] = list(vals)
         if a.serves:
             fm["serves"] = a.serves
-        for f in list(a.satisfies or []) + ([a.serves] if a.serves else []):
+        for f in (list(a.satisfies or []) + list(a.depends_on or []) + list(a.based_on or [])
+                  + ([a.serves] if a.serves else [])):
             if f not in cx.by_id:
                 die(f"ребро → {f!r}: такого узла нет. Сначала узел, потом ссылка.")
         target = cx.ground / "NEXUS" / a.nexus / f"{nid}.md"
@@ -1414,6 +1436,255 @@ def cmd_resolve(cx: Cortex, a):
     return 0
 
 
+DEP_FIELDS = ("depends_on", "based_on", "satisfies", "serves", "realizes", "addresses")
+
+
+def _seams(cx: Cortex, pid: str):
+    """Рёбра, пересекающие границу зоны. Наружу — моя работа упирается в чужое;
+    внутрь — на мою работу рассчитывают."""
+    out, inn = [], []
+    for n in cx.nodes:
+        if n.layer not in ("curated", "decisions") or not n.id:
+            continue
+        mine = cx.in_my_zone(pid, n)
+        for f in DEP_FIELDS:
+            v = n[f]
+            for tid in (v if isinstance(v, list) else [v]):
+                if not isinstance(tid, str) or tid not in cx.by_id:
+                    continue
+                tgt = cx.by_id[tid]
+                tmine = cx.in_my_zone(pid, tgt)
+                if mine and not tmine:
+                    out.append((n, f, tgt))
+                elif tmine and not mine:
+                    inn.append((n, f, tgt))
+    return out, inn
+
+
+def cmd_seams(cx: Cortex, a):
+    pid = active_profile(cx, a.as_profile)
+    if not pid:
+        die("укажите профиль: --as <профиль> или CORTEX_PROFILE")
+    out, inn = _seams(cx, pid)
+    key = lambda row: (cx.effective_cp(row[2]) or 9)
+    out.sort(key=key)
+
+    if a.json:
+        print(json.dumps({
+            "profile": pid,
+            "outgoing": [{"my_node": anchors(cx, n), "field": f, "depends_on": anchors(cx, t_)}
+                         for n, f, t_ in out],
+            "incoming": [{"their_node": anchors(cx, n), "field": f, "my_node": anchors(cx, t_)}
+                         for n, f, t_ in inn],
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    print(bold(f"Стыки профиля {pid}"))
+    print(dim("  зоны пересекаются: это не аномалия, а место, где нужна координация\n"))
+    if out:
+        print(bold("  Наружу — моё упирается в чужое:"))
+        print(dim("  слабейшая ступень на чужой стороне и есть потолок вашего обещания\n"))
+        for n, f, tgt in out[:a.top]:
+            ecp = _num(cx.effective_cp(tgt))
+            rip = cx.ripeness_of(tgt)[0]
+            mark = red("●") if (ecp or 9) <= 3 else (ylw("●") if (ecp or 9) <= 5 else grn("●"))
+            print(f"  {mark} {str(n.title)[:34]:34} {dim('—' + f + '→')} {str(tgt.title)[:30]:30}")
+            print(dim(f"       чужая зона {cx.scope_of(tgt)} · владелец {tgt['owner']} · "
+                      f"CP {ecp} · {rip}"))
+    else:
+        print(dim("  наружу: нет — ваша работа ни на что чужое не опирается"))
+    print()
+    if inn:
+        print(bold("  Внутрь — на моё рассчитывают:"))
+        for n, f, tgt in inn[:a.top]:
+            print(f"  {dim('○')} {str(n.title)[:34]:34} {dim('—' + f + '→')} {str(tgt.title)[:30]:30}")
+            print(dim(f"       из зоны {cx.scope_of(n)} · владелец {n['owner']}"))
+        print(dim("\n  понижение CP здесь бьёт по чужому кварталу — предупреждайте владельца"))
+    else:
+        print(dim("  внутрь: нет — на вашу зону пока никто не ссылается"))
+    return 0
+
+
+def _first_para(body: str, limit=180) -> str:
+    for block in body.split("\n\n"):
+        s = " ".join(block.split())
+        if s and not s.startswith(("#", "|", ">", "-")):
+            return s[:limit] + ("…" if len(s) > limit else "")
+    return ""
+
+
+def _pack_node(cx: Cortex, n: Node, body=True) -> str:
+    ecp = _num(cx.effective_cp(n))
+    rip = cx.ripeness_of(n)[0]
+    bits = [x for x in (n["node_type"], f"CP {ecp}" if ecp else None, rip,
+                        f"владелец {n['owner']}" if n["owner"] else None) if x]
+    head = f"- **{n.title}** `{n.id}`"
+    if n["status"] == "draft":
+        head += " ⚠️ черновик, не принят"
+    lines = [head, f"  {' · '.join(map(str, bits))}"]
+    if n["aliases"]:
+        lines.append(f"  зовут также: {', '.join(map(str, n['aliases']))}")
+    if body:
+        para = _first_para(n.body)
+        if para:
+            lines.append(f"  {para}")
+    src = ", ".join(map(str, (n["sources"] or [])[:2]))
+    lines.append(f"  источник: {src or '—'}")
+    return "\n".join(lines)
+
+
+def cmd_pack(cx: Cortex, a):
+    """Срез памяти под профиль: своя зона + стыки + подписки + ядро.
+
+    Профиль не обязан иметь шелл и не вместит пятьсот узлов — он получает
+    собранный пакет, который пересобирает детерминированный прогон."""
+    if getattr(a, "all", False):
+        rc = 0
+        for one in cx.profiles():
+            a.as_profile, a.all = one, False
+            rc |= cmd_pack(cx, a)
+        return rc
+    pid = active_profile(cx, a.as_profile)
+    if not pid:
+        die("укажите профиль: --as <профиль>, CORTEX_PROFILE или --all")
+    prof = cx.profiles()[pid]
+    zones = cx.profile_writes(pid)
+
+    curated = [n for n in cx.nodes if n.layer in ("curated", "decisions") and n.id
+               and n["status"] != "rejected"]
+    mine = sorted([n for n in curated if cx.in_my_zone(pid, n)], key=lambda n: (n["nexus"] or "", n.id))
+    subs = [n for n in cx.profile_subs(pid) if not cx.in_my_zone(pid, n)]
+    out_seams, in_seams = _seams(cx, pid)
+    core = sorted([n for n in curated if cx.scope_of(n) == "org" and n not in subs],
+                  key=lambda n: (-(cx.effective_cp(n) or 0), n.id))
+    people = [n for n in core if n["node_type"] == "person"]
+    rules = [n for n in core if n["nexus"] == "ops-model"]
+    rest_core = [n for n in core if n not in people and n not in rules]
+    stale = [n for n in mine + subs if cx.ripeness_of(n)[0] == "wilting"]
+    questions = _open_questions(cx, mine)
+
+    if a.json:
+        print(json.dumps({
+            "profile": pid, "zones": zones, "built": str(TODAY),
+            "my_zone": [anchors(cx, n) for n in mine],
+            "subscriptions": [anchors(cx, n) for n in subs],
+            "outgoing_seams": [{"mine": anchors(cx, n), "field": f, "theirs": anchors(cx, t_)}
+                               for n, f, t_ in out_seams],
+            "core": [anchors(cx, n) for n in (people + rules + rest_core)[:a.core_limit]],
+            "stale": [anchors(cx, n) for n in stale],
+            "open_questions": questions,
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    L = []
+    w = L.append
+    w(f"# Срез памяти: {prof.get('name') or pid}")
+    w("")
+    w(f"Собран {TODAY} командой `cortex pack --as {pid}`. Это **производный артефакт**: "
+      f"истина — в репозитории, срез пересобирается и не правится руками.")
+    w("")
+    w(f"- **Ваш профиль:** `{pid}`" + (f" · {prof.get('person')}" if prof.get("person") else ""))
+    w(f"- **Ваши зоны записи:** {', '.join(zones) or '—'}")
+    w(f"- **В зоне узлов:** {len(mine)} · подписок: {len(subs)} · "
+      f"стыков наружу: {len(out_seams)} · протухло: {len(stale)}")
+    w("")
+    w("## Как этим пользоваться")
+    w("")
+    w("Это то, что память знает на момент сборки. Правила, которые не обсуждаются:")
+    w("")
+    w("- **Уверенность (CP) — ступень 2–9 по силе артефакта, а не мнение.** Устное и чат "
+      "не выше третьей, пересказ чужих слов не выше второй.")
+    w("- **Узел, помеченный черновиком, фактом не считается** — его ещё не принял человек.")
+    w("- **Протухший узел** (`wilting`) верифицируют источником или понижают ему CP; "
+      "ссылаться на него как на свежий факт нельзя.")
+    w("- **Отвечая, называйте, на чём держится ответ** — ступень и источник, — "
+      "**что неизвестно** и **какой артефакт изменил бы ответ**.")
+    w("- «Память не знает» — валидный ответ. Догадка вместо факта отравляет память.")
+    w("")
+
+    def section(title, nodes, note="", body=True, limit=None):
+        if not nodes:
+            return
+        w(f"## {title}")
+        w("")
+        if note:
+            w(f"_{note}_")
+            w("")
+        shown = nodes[:limit] if limit else nodes
+        for n in shown:
+            w(_pack_node(cx, n, body=body))
+            w("")
+        if limit and len(nodes) > limit:
+            w(f"_…ещё {len(nodes) - limit}. Полностью — `cortex ask` по теме._")
+            w("")
+
+    by_nexus = defaultdict(list)
+    for n in mine:
+        by_nexus[n["nexus"]].append(n)
+    if mine:
+        w("## Ваша зона")
+        w("")
+        for nx, ns in sorted(by_nexus.items()):
+            w(f"### {nx}")
+            w("")
+            for n in ns:
+                w(_pack_node(cx, n))
+                w("")
+
+    if out_seams:
+        w("## Стыки: ваша работа упирается в чужое")
+        w("")
+        w("_Слабейшая ступень на чужой стороне — потолок вашего обещания. "
+          "Координация здесь обязательна, и она не решается записью в чужую зону._")
+        w("")
+        for n, f, tgt in sorted(out_seams, key=lambda r: (cx.effective_cp(r[2]) or 9))[:a.seam_limit]:
+            w(f"- **{n.title}** —{f}→ **{tgt.title}** `{tgt.id}`")
+            w(f"  чужая зона {cx.scope_of(tgt)} · владелец {tgt['owner']} · "
+              f"CP {_num(cx.effective_cp(tgt))} · {cx.ripeness_of(tgt)[0]}")
+            w("")
+
+    section("Подписки", subs,
+            "То, что вы объявили для себя горячим: чужое, но нужное часто.")
+    section("Кто есть кто", people,
+            "Ядро организации. Меняется через куратора — вы это читаете, но не правите.",
+            body=False, limit=a.core_limit)
+    section("Правила игры", rules,
+            "Операционная модель: как принимаются решения в этой организации.")
+    section("Ядро: остальное", rest_core, body=False, limit=a.core_limit)
+
+    if stale:
+        w("## Протухло — проверить или понизить уверенность")
+        w("")
+        for n in stale:
+            w(f"- **{n.title}** `{n.id}` · владелец {n['owner']} · "
+              f"обновлено {n['updated']}")
+        w("")
+    if questions:
+        w("## Открытые вопросы")
+        w("")
+        for q in questions[:20]:
+            w(f"- {q}")
+        w("")
+    w("---")
+    w("")
+    w(f"_Сомневаетесь — спросите память: `cortex ask \"<тема>\" --as {pid}`, "
+      f"`cortex resolve \"<как назвали>\"`, `cortex seams --as {pid}`._")
+
+    text = "\n".join(L)
+    if a.stdout:
+        print(text)
+        return 0
+    target = pathlib.Path(a.out) if a.out else (cx.ground / "_index" / "packs" / f"{pid}.md")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    print(grn(f"✓ срез собран: {target.relative_to(cx.root)}") +
+          dim(f"  {len(text)} символов, узлов {len(mine) + len(subs) + min(len(core), a.core_limit)}"))
+    if len(text) > a.budget:
+        print(ylw(f"  срез больше бюджета {a.budget}: сузьте подписки или "
+                  f"уменьшите --core-limit"))
+    return 0
+
+
 def cmd_profiles(cx: Cortex, a):
     profs = cx.profiles()
     wrote = Counter(str(n["captured_by"]) for n in cx.nodes if n["captured_by"])
@@ -1546,6 +1817,8 @@ def main(argv=None):
     p.add_argument("--ttl", type=int)
     p.add_argument("--source", action="append")
     p.add_argument("--satisfies", action="append")
+    p.add_argument("--depends-on", dest="depends_on", action="append")
+    p.add_argument("--based-on", dest="based_on", action="append")
     p.add_argument("--serves")
     p.add_argument("--by", dest="by", default="human")
     p.add_argument("--status", choices=["draft", "accepted"])
@@ -1563,6 +1836,17 @@ def main(argv=None):
     p.add_argument("--owner")
     p.add_argument("--types", action="append")
     p.add_argument("--purpose")
+    p = add("pack", cmd_pack, "собрать срез памяти под профиль")
+    p.add_argument("--out")
+    p.add_argument("--stdout", action="store_true")
+    p.add_argument("--all", action="store_true", help="пересобрать срезы всех профилей")
+    p.add_argument("--core-limit", dest="core_limit", type=int, default=40)
+    p.add_argument("--seam-limit", dest="seam_limit", type=int, default=15)
+    p.add_argument("--budget", type=int, default=60000, help="ориентир размера в символах")
+    p.add_argument("--json", action="store_true")
+    p = add("seams", cmd_seams, "стыки с другими PO: во что упираюсь и на меня рассчитывают")
+    p.add_argument("--top", type=int, default=15)
+    p.add_argument("--json", action="store_true")
     p = add("review", cmd_review, "очередь приёмки: что агенты собрали и ждёт вашего да")
     p.add_argument("--nexus")
     p.add_argument("--accept", action="append", default=[])
