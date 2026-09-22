@@ -146,6 +146,7 @@ GROUND/
     profiles.yaml           распад: change_rate → срок годности
     ladder.yaml             лестница доказательств 2–9 и потолки
     agents.yaml             агенты и зоны записи
+    gate.yaml               жёсткость каждой проверки: error · warn · off
   NEXUS/                    знание: узлы с источниками
     _registry.yaml          Нексусы, их зоны и типы узлов
   DECIDE/                   обещания, артефакты, решения, наблюдения
