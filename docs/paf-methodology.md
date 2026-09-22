@@ -30,8 +30,8 @@ PAF (Product Ai Framework), [productframework.ru/ops/main][S1],
 ## Кортекс
 
 **Кортекс** — ИИ-операционка, управляющая Нексусами. В этом репозитории Кортекс
-это связка: ИИ-агент (Claude Code) + контракт `AGENTS.md` + скиллы `.claude/skills/`
-+ движок памяти `poh-memory-engine`.
+это связка: ИИ-агенты (Claude Code, боты профиля Hermes Agent) + контракт
+`AGENTS.md` + схема `GROUND/SCHEMA/` + инструмент `bin/cortex`.
 
 Разделение ответственности жёсткое: **система владеет исполнением и формой,
 человек владеет целью и решением** (`GROUND/NEXUS/ops-model/delegation-boundary.md`).
@@ -94,8 +94,7 @@ p < 0.5  → fresh        p < 1.0 → ripening        p ≥ 1.0 → wilting
 - **[S1]** https://productframework.ru/ops/main — операционная модель PAF
 - **[S2]** https://productframework.ru/ai_product_roles — роли AI-native продукта
 - **[S3]** https://productframework.ru/skill_map — карта навыков
-- Схемы движка: `sa_documentation/nexus_schema.md`, `ground_schema.md`,
-  `nexus_catalog.md`, `naming_conventions.md` в
-  [poh-memory-engine](https://github.com/po-helper-org/poh-memory-engine)
+- Схема памяти этого репозитория: `GROUND/SCHEMA/` — типы, рёбра,
+  лестница доказательств, профили распада, зоны агентов.
 
 [S1]: https://productframework.ru/ops/main

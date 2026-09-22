@@ -6,6 +6,8 @@ paf_step: null
 sprint_phase: null
 kind: normative
 owner: Product Ops
+scope: org
+captured_by: human
 confidence: 1.0
 sources: ["[S1]", "[S2]", "repo:poh-memory-engine"]
 updated: 2026-08-20

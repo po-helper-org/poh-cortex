@@ -1,11 +1,9 @@
-name: GROUND gate
+name: Память
 
-on:
-  push:
-  pull_request:
+on: [push, pull_request]
 
 jobs:
-  validate:
+  gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,16 +11,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Движок — flat-layout без явного packages в pyproject, pip install падает.
-      # Скрипт кладёт исходники в .engine/ и добавляет их в PYTHONPATH сам.
-      - name: Install PyYAML
-        run: pip install "PyYAML>=6.0"
+      # Ни pip install, ни сервисов: инструмент живёт на стандартной библиотеке.
+      - name: Гейт памяти
+        run: bin/cortex gate
 
-      # Тот же гейт, что запускает человек и ИИ-агент перед коммитом:
-      # схема config + registry, Node schema, висячие рёбра, дрейф свежести.
-      - name: Gate memory
-        run: ./scripts/cortex.sh gate
+      # Вычисляемые поля должны быть пересчитаны до коммита, а не в CI.
+      - name: Свежесть пересчитана
+        run: bin/cortex refresh --dry-run
 
-      # Read-only отчёт: узлы, рёбра, Context Ripeness по Нексусам.
-      - name: Report (read-only)
-        run: ./scripts/cortex.sh report
+      - name: Дымовой тест инструмента
+        run: tests/smoke.sh
+
+      - name: Отчёт
+        run: bin/cortex report

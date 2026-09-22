@@ -1,12 +1,12 @@
 # Заполнение Кортекса: от пустого шаблона до рабочей памяти
 
 Порядок важен: каждый следующий шаг опирается на предыдущий. Пропущенный шаг
-превращается в дыру, которую видно в `./scripts/cortex.sh gaps`.
+превращается в дыру, которую видно в `bin/cortex gaps`.
 
 ## Шаг 0 — привязать vault к себе
 
 ```bash
-./scripts/cortex.sh init
+bin/cortex init
 ```
 
 Заполняет `GROUND/config.yaml` (организация, продукт, slug, идея, продуктовый
@@ -15,7 +15,7 @@
 Дальше руками: `team.size`, остальной `roster` (имя человека, `Cortex` для
 делегированной роли, `null` если роли нет), `cortex.phase_target`.
 
-**Чек:** `./scripts/cortex.sh gate` → секция ПЛЕЙСХОЛДЕРЫ не упоминает `config.yaml`.
+**Чек:** `bin/cortex gate` → секция ПЛЕЙСХОЛДЕРЫ не упоминает `config.yaml`.
 
 ## Шаг 1 — намерение
 
@@ -44,7 +44,7 @@
 - `confidence` 0.2–0.4, пока нет валидации;
 - «не знаю / не мерили» — это результат, а не пробел для заполнения.
 
-**Чек:** `./scripts/cortex.sh report` → Context Ripeness по Нексусам перестала
+**Чек:** `bin/cortex report` → Context Ripeness по Нексусам перестала
 быть нулевой; `Workslop (без sources)` = число незаполненных `_index`, не больше.
 
 ## Шаг 3 — ось ценности
@@ -55,7 +55,7 @@
 segment —has_need→ need ←addresses— value-proposition ←realizes— feature → product
 ```
 
-**Чек:** `./scripts/cortex.sh gaps` → раздел «Без ценностного ребра» пуст.
+**Чек:** `bin/cortex gaps` → раздел «Без ценностного ребра» пуст.
 
 ## Шаг 4 — хребет OKR
 
@@ -66,13 +66,13 @@ segment —has_need→ need ←addresses— value-proposition ←realizes— fea
 Заполните `ROADMAP/kr-epic-map.md`, затем:
 
 ```bash
-./scripts/cortex.sh build
+bin/cortex build
 ```
 
 Движок создаст узлы `objective` / `key-result` и запишет рёбра `SERVES` /
 `DELIVERS`. Свяжите контент с целями через `satisfies: [kr-1-2]` в узлах.
 
-**Чек:** `./scripts/cortex.sh gaps` → достижимость value-контента от хребта KR
+**Чек:** `bin/cortex gaps` → достижимость value-контента от хребта KR
 растёт; сироты — это ценность, не привязанная ни к одной цели.
 
 ## Шаг 5 — People Graph
@@ -91,7 +91,7 @@ segment —has_need→ need ←addresses— value-proposition ←realizes— fea
 | новый факт, интервью, данные | `/paf-node` → узел или обновление CP |
 | узел стал `wilting` | верифицировать источником **или** понизить CP |
 | смена квартала | `/paf-okr` → новые Objectives, старые узлы не удалять |
-| перед каждым коммитом | `./scripts/cortex.sh gate` |
+| перед каждым коммитом | `bin/cortex gate` |
 
 ## Как понять, что память живая
 

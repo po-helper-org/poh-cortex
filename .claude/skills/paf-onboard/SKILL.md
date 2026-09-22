@@ -14,9 +14,9 @@ description: Онбординг организации в Кортекс по м
 ## Фаза A — что уже есть
 
 1. Прочитайте `GROUND/config.yaml`. Если в нём остались плейсхолдеры `< >` —
-   остановитесь и предложите `./scripts/cortex.sh init`.
+   остановитесь и предложите `bin/cortex init`.
 2. Прочитайте `GROUND/NEXUS/_registry.yaml`: какие Нексусы инстанцированы.
-3. `./scripts/cortex.sh report` — что уже в памяти, какая Context Ripeness.
+3. `bin/cortex report` — что уже в памяти, какая Context Ripeness.
 4. Соберите доступные источники: `VISION.md`, документы, которые даёт человек,
    README репозиториев, аналитика. Запишите список в
    `onboarding.sources_ingested` в `config.yaml`.
@@ -49,7 +49,7 @@ description: Онбординг организации в Кортекс по м
 segment —has_need→ need ←addresses— value-proposition ←realizes— feature → product
 ```
 
-Проверьте: `./scripts/cortex.sh gaps` — каждый контент-узел должен быть
+Проверьте: `bin/cortex gaps` — каждый контент-узел должен быть
 достижим от хребта OKR. Сироты означают, что ценность не привязана к цели.
 
 Обновите `onboarded` в `_registry.yaml`: `todo` → `partial` → `done`
@@ -57,7 +57,7 @@ segment —has_need→ need ←addresses— value-proposition ←realizes— fea
 
 ## Фаза D — фиксация
 
-1. `./scripts/cortex.sh gate` — ноль ERROR.
+1. `bin/cortex gate` — ноль ERROR.
 2. В `config.yaml`: `onboarding.status: in_progress` (или `done`),
    `onboarding.onboarded_at`, `onboarding.baseline_cr` — из отчёта.
 3. Коммит: `onboard(<нексус>): <что оцифровано>`.

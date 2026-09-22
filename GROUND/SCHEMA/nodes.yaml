@@ -1,0 +1,70 @@
+# Схема узла. Это данные, а не код: инструмент читает их при каждом запуске.
+# Новый агент расширяет память декларацией здесь или в _registry.yaml,
+# а не правкой инструмента и не форком чужого репозитория.
+
+version: 2
+
+# Ключи, без которых узел не узел. Проверяются во всех курируемых слоях.
+required_keys: [nexus, node_id, node_type, kind, owner, sources, updated, ripeness]
+
+# Ключи смысла: не обязательны схемой, но именно они делают память пригодной
+# для решения. Их отсутствие видно в report, а не в гейте.
+meaning_keys: [cp, confidence, change_rate, scope, captured_by, ttl_days]
+
+# Слой решений живёт по своим правилам: ставка и артефакт не принадлежат Нексусу,
+# у них другой жизненный цикл (артефакт не стареет, стареет знание о мире).
+layer_required:
+  decisions: [node_id, node_type, owner, sources, updated]
+
+enums:
+  kind: [normative, empirical]
+  ripeness: [fresh, ripening, wilting]
+  change_rate: [high, medium, low, unknown]
+  scope_kind: [org, team, product, personal]
+
+# Базовый каталог типов. Нексус может объявить свои — см. node_types в _registry.yaml.
+node_types:
+  # каркас памяти
+  spine:              {group: каркас}
+  operating-model:    {group: каркас}
+  concept:            {group: каркас}
+  entity:             {group: каркас}
+  step-overview:      {group: каркас}
+  sprint-phase:       {group: каркас}
+  bootstrap:          {group: каркас}
+  gates:              {group: каркас}
+  component-ref:      {group: каркас}
+  initiative:         {group: каркас}
+  # ось ценности PAF
+  segment:            {group: ось ценности}
+  need:               {group: ось ценности}
+  value-proposition:  {group: ось ценности}
+  feature:            {group: ось ценности}
+  product:            {group: ось ценности}
+  service:            {group: ось ценности}
+  platform:           {group: ось ценности}
+  interface:          {group: ось ценности}
+  # хребет целей
+  objective:          {group: хребет}
+  key-result:         {group: хребет}
+  epic:               {group: хребет}
+  task:               {group: хребет}
+  # корпоративные объекты решений (раздел 7 методички)
+  system-component:   {group: IT-ландшафт}
+  integration:        {group: IT-ландшафт}
+  dependency:         {group: внешние зависимости, also_required: [owner, channel]}
+  process:            {group: бизнес-процессы}
+  standard:           {group: регуляторика}
+  experiment:         {group: эксперименты}
+  precedent:          {group: эксперименты}
+  # люди и решения
+  person:             {group: люди}
+  decision:           {group: решения}
+  risk:               {group: решения}
+  bet:                {group: решения, also_required: [gate, due, cp]}
+  evidence:           {group: решения, also_required: [author, channel, scope, link]}
+  # операционка
+  episode:            {group: операционка}
+  daybook:            {group: операционка}
+  chat-profile:       {group: операционка}
+  channel:            {group: операционка}

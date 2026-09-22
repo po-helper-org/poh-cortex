@@ -1,54 +1,45 @@
-# Справочник: Node schema
+# Справочник: схема узла
 
-Каждый `.md` в `GROUND/NEXUS/**` с YAML-frontmatter — узел графа.
-Файл без frontmatter узлом не считается и гейтом игнорируется.
+Каждый `.md` с YAML-frontmatter — узел. Файл без frontmatter узлом не считается.
+Источник истины по схеме — `GROUND/SCHEMA/nodes.yaml`; здесь пояснения к нему.
 
 ## Обязательные ключи
 
-| Ключ | Тип | Значение |
-|---|---|---|
-| `nexus` | slug | **только** из `GROUND/NEXUS/_registry.yaml` |
-| `node_id` | ascii-строка | стабильный навсегда; переименование рвёт рёбра |
-| `node_type` | enum | см. ниже |
-| `kind` | enum | `normative` (методология) · `empirical` (контекст организации) |
-| `owner` | строка | роль PAF или имя персоны из Нексуса `team` |
-| `confidence` | 0..1 | Confidence Point |
-| `sources` | список | обязателен и непуст; пусто = workslop |
-| `updated` | YYYY-MM-DD | дата последнего осмысленного изменения |
-| `ttl_days` | int | срок годности |
-| `ripeness` | enum | `fresh` · `ripening` · `wilting` — вычисляемое |
-
-Необязательные: `paf_step` (0–8 или null), `sprint_phase`, `tags`, `title`.
-
-## `node_type`
-
-| Группа | Значения |
+| Ключ | Значение |
 |---|---|
-| каркас | `spine`, `operating-model`, `gates`, `bootstrap`, `step-overview`, `sprint-phase` |
-| ось ценности | `product`, `service`, `interface`, `platform`, `feature`, `value-proposition`, `need`, `segment` |
-| хребет OKR | `objective`, `key-result`, `epic`, `task` |
-| прочее | `person`, `episode`, `risk`, `decision`, `component-ref`, `entity`, `concept` |
+| `nexus` | только из `GROUND/NEXUS/_registry.yaml` |
+| `node_id` | ascii, нижний регистр, **стабильный навсегда**: переименование рвёт рёбра |
+| `node_type` | из каталога `SCHEMA/nodes.yaml` или из `node_types` своего Нексуса |
+| `kind` | `normative` (методология) · `empirical` (контекст организации) |
+| `owner` | роль или имя персоны из Нексуса `team` |
+| `sources` | обязателен и непуст: пусто = workslop |
+| `updated` | дата последнего осмысленного изменения |
+| `ripeness` | вычисляется `cortex refresh`, руками не ставится |
+
+Слой решений (`GROUND/DECIDE/`) живёт по своим обязательным ключам —
+`layer_required` в `nodes.yaml`: ставка и артефакт не принадлежат Нексусу.
+
+## Ключи смысла
+
+Не требуются схемой, но именно они делают память пригодной для решения.
+
+| Ключ | Зачем |
+|---|---|
+| `cp` | ступень 2–9 из `SCHEMA/ladder.yaml` — по сильнейшему артефакту |
+| `confidence` | то же в долях (`cp/9`), для отчётов и совместимости |
+| `change_rate` | `high` · `medium` · `low` · `unknown`; выводится из истории изменений объекта |
+| `ttl_days` | срок годности; если не задан — берётся из `change_rate` |
+| `scope` | зона: `org` · `team:<имя>` · `product:<имя>` |
+| `captured_by` | кто записал: `human`, `claude-code`, `skill:<имя>`, `hermes:<бот>` |
+
+`change_rate` не угадывается: данных нет ни у вас, ни у владельца — ставится
+`unknown`, который трактуется как `high`. Асимметрия ошибки: завысили —
+заплатили перепроверкой, занизили — получили протухшее знание и сорванный квартал.
 
 ## Рёбра
 
-Пишутся полями, выводятся детерминированно. Ссылка на несуществующий `node_id`
-роняет гейт.
-
-| Поле | Ребро | Направление |
-|---|---|---|
-| `has_need` | HAS_NEED | segment → need |
-| `addresses` | ADDRESSES | value-proposition → need |
-| `realizes` | REALIZES | feature → value-proposition |
-| `depends_on` | DEPENDS_ON | product → feature |
-| `based_on` | BASED_ON | узел → основание |
-| `satisfies` | SATISFIES | узел → key-result |
-| `serves` | SERVES | key-result → objective |
-| `owner`, `owns_node` | OWNS | персона → узел |
-| `reports_to`, `manages` | org chart | person → person |
-| `collaborates_with` | social graph | person → person |
-| `mentions`, `involves` | из эпизодов PULSE | генерируются движком |
-
-**Ось ценности:**
+Пишутся полями, выводятся детерминированно. Полный список —
+`GROUND/SCHEMA/edges.yaml`. Ссылка на несуществующий `node_id` роняет гейт.
 
 ```
 segment —has_need→ need ←addresses— value-proposition ←realizes— feature → product
@@ -56,27 +47,23 @@ segment —has_need→ need ←addresses— value-proposition ←realizes— fea
                                                                 key-result —serves→ objective
 ```
 
-## TTL по типам
+Связь, упомянутая только в тексте, графом не становится.
 
-| Что | `ttl_days` |
-|---|---|
-| методология (`normative`) | 365 |
-| продукт, потребитель, рынок | 90 |
-| система роста | 60 |
-| персоны (`team`) | 180 |
-| портфель (`company`) | 180 |
+## Расширение схемы
 
-## Файлы, которые движок пропускает
+Нужен свой тип узла — объявите его у Нексуса:
 
-| Имя | Поведение |
-|---|---|
-| `_template.md` | пропускается линтером; **не давайте ему настоящий frontmatter** — загрузчик узлов читает любой файл с `node_id` и создаст фантом |
-| `_index.md`, `_registry.yaml` | пустой `sources` — WARN, а не ERROR |
-| файлы без frontmatter | не узлы, игнорируются |
-| `GROUND/PULSE/summaries/*.md` | формат эпизода, не Node schema; гейт их не линтует |
+```yaml
+- {slug: landscape, source: custom, name: IT-ландшафт, scope: org,
+   node_types: [system-component, integration], change_rate: high, ...}
+```
+
+Нужны свои поля — добавляйте: инструмент не мешает незнакомым ключам и не
+теряет их. Обязательные ключи они не заменяют.
 
 ## Проверка
 
-```bash
-./scripts/cortex.sh gate
+```sh
+bin/cortex gate
+bin/cortex node check <node_id>
 ```
