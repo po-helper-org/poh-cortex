@@ -50,6 +50,7 @@ if [ -n "$PROFILE" ]; then
   check "профиль не пишет в ядро"      2 --as "$PROFILE" node new --nexus team --type person --title X --source y --scope org
   check "профиль не пишет в чужую зону" 2 --as "$PROFILE" node new --nexus product --type feature --title X --source y --scope "team:посторонняя"
   check "стыки считаются"              0 --as "$PROFILE" seams
+  check "--as после подкоманды"        0 seams --as "$PROFILE"
   check "срез профиля собирается"      0 --as "$PROFILE" pack --stdout
 else
   echo "  --   профилей не объявлено: проверки зон пропущены"

@@ -2244,6 +2244,11 @@ def main(argv=None):
     def add(name, fn, help_):
         p = sub.add_parser(name, help=help_)
         p.set_defaults(fn=fn)
+        # --as принимается и до, и после подкоманды: человек напишет как удобно,
+        # а SUPPRESS не даёт подкоманде затереть значение, заданное глобально.
+        p.add_argument("--as", dest="as_profile", metavar="ПРОФИЛЬ",
+                       default=argparse.SUPPRESS,
+                       help="от чьего имени работаем (см. cortex profiles)")
         return p
 
     add("doctor", cmd_doctor, "самодиагностика: что загружено и чем проверяется")
@@ -2356,6 +2361,8 @@ def main(argv=None):
     add("init", cmd_init, "привязать vault к организации")
 
     a = ap.parse_args(argv)
+    if not hasattr(a, "as_profile"):
+        a.as_profile = None
     root = pathlib.Path(a.root).resolve() if a.root else find_root()
     try:
         cx = Cortex(root)
