@@ -66,7 +66,22 @@ def _scalar(v: str):
     if v == "" or v in ("~", "null", "Null", "NULL"):
         return None
     if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-        return v[1:-1]
+        inner = v[1:-1]
+        if v[0] == "'":
+            return inner.replace("''", "'")
+        # Двойные кавычки несут escape-последовательности, как того требует YAML.
+        out, i = [], 0
+        while i < len(inner):
+            ch = inner[i]
+            if ch == "\\" and i + 1 < len(inner):
+                nxt = inner[i + 1]
+                out.append({"n": "\n", "t": "\t", "r": "\r", "0": "\0",
+                            "\\": "\\", '"': '"', "/": "/"}.get(nxt, "\\" + nxt))
+                i += 2
+                continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
     low = v.lower()
     if low in ("true", "yes"):
         return True
@@ -452,7 +467,11 @@ class Cortex:
         decay = self.schema["profiles"].get("decay") or {}
         per = float(decay.get("steps_per_ttl", 2.0))
         lost = max(0.0, (p - 1.0)) * per if p > 1 else 0.0
-        return max(float(decay.get("floor", 2)), round(cp - lost, 1))
+        val = max(float(decay.get("floor", 2)), round(cp - lost, 1))
+        if node["disputed"]:
+            cap = ((self.schema["ladder"].get("ceilings") or {}).get("disputed") or 4)
+            val = min(val, float(cap))   # спор не решается в пользу одной стороны
+        return val
 
     def profiles(self) -> dict:
         return {p.get("id"): p for p in (self.schema["agents"].get("profiles") or []) if p.get("id")}
@@ -1685,6 +1704,381 @@ def cmd_pack(cx: Cortex, a):
     return 0
 
 
+def _intake_age(cx: Cortex):
+    """Сколько лежит неразобранное. Очередь без ритма превращается в свалку."""
+    d = cx.ground / "_intake"
+    if not d.is_dir():
+        return 0, None
+    files = [f for f in d.rglob("*.md") if f.name not in ("README.md", "inbox.md")]
+    inbox = d / "inbox.md"
+    if inbox.exists() and len([x for x in inbox.read_text(encoding="utf-8").splitlines()
+                               if x.strip() and not x.startswith(("#", "-", ">"))]) > 3:
+        files.append(inbox)
+    if not files:
+        return 0, None
+    oldest = min(files, key=lambda f: f.stat().st_mtime)
+    age = (datetime.datetime.now() - datetime.datetime.fromtimestamp(oldest.stat().st_mtime)).days
+    return len(files), age
+
+
+def _same_object(a_node: Node, b_node: Node) -> float:
+    """Похоже ли, что это два описания одного объекта. Детерминированно:
+    пересечение псевдонимов или совпадение заголовков."""
+    def names(n):
+        return {str(x).lower().strip() for x in (n["aliases"] or [])} | {str(n.title).lower().strip()}
+
+    al_a, al_b = names(a_node), names(b_node)
+    if al_a & al_b:
+        return 1.0
+    ta, tb = set(norm(a_node.title)), set(norm(b_node.title))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _conflicts(cx: Cortex, threshold=0.6):
+    nodes = [n for n in cx.nodes if n.layer in ("curated", "decisions") and n.id]
+    out = []
+    for i, x in enumerate(nodes):
+        for y in nodes[i + 1:]:
+            # спор возможен только между разными зонами или разными авторами:
+            # два узла одного автора в одной зоне — это дубликат, а не расхождение
+            if cx.scope_of(x) == cx.scope_of(y) and x["captured_by"] == y["captured_by"]:
+                continue
+            sim = _same_object(x, y)
+            if sim < threshold:
+                continue
+            marks = []
+            if x["owner"] and y["owner"] and str(x["owner"]) != str(y["owner"]):
+                marks.append("разные владельцы")
+            cx_, cy = cx.cp_of(x), cx.cp_of(y)
+            if cx_ and cy and abs(cx_ - cy) >= 3:
+                marks.append(f"уверенность расходится на {abs(cx_ - cy):.0f} ступени")
+            rx, ry = cx.ripeness_of(x)[0], cx.ripeness_of(y)[0]
+            if {rx, ry} == {"fresh", "wilting"}:
+                marks.append("одна сторона протухла")
+            if marks or sim >= 0.95:
+                out.append((round(sim, 2), x, y, marks or ["два описания одного объекта"]))
+    out.sort(key=lambda r: -r[0])
+    return out
+
+
+def _add_field(node: Node, key: str, value):
+    text = node.path.read_text(encoding="utf-8")
+    if re.search(rf"^{key}:.*$", text, re.M):
+        text = re.sub(rf"^{key}:.*$", f"{key}: {value}", text, count=1, flags=re.M)
+    else:
+        text = text.replace("---\n", f"---\n{key}: {value}\n", 1)
+    node.path.write_text(text, encoding="utf-8")
+
+
+def cmd_conflicts(cx: Cortex, a):
+    """Расхождения между зонами. Система не выбирает правильную сторону:
+    расхождение и есть неопределённость, и оно опускает уверенность обеим."""
+    if a.resolve:
+        n = cx.by_id.get(a.resolve)
+        if not n:
+            die(f"нет узла {a.resolve!r}")
+        if not a.source:
+            die("снятие спора требует нового источника (--source): спор не закрывается "
+                "рассуждением, иначе он закрывается в пользу того, кто настойчивее")
+        _add_field(n, "disputed", "false")
+        cur = n["sources"] or []
+        text = n.path.read_text(encoding="utf-8")
+        merged = cur + [s for s in a.source if s not in cur]
+        text = re.sub(r"^sources:.*$", "sources: [" + ", ".join(_q(s) for s in merged) + "]",
+                      text, count=1, flags=re.M)
+        n.path.write_text(text, encoding="utf-8")
+        print(grn(f"✓ спор снят по {a.resolve}") + dim(" — вторая сторона остаётся спорной, "
+                                                       "пока её тоже не подтвердят"))
+        return 0
+
+    pairs = _conflicts(cx)
+    if a.as_profile:
+        pid = active_profile(cx, a.as_profile)
+        pairs = [r for r in pairs if cx.in_my_zone(pid, r[1]) or cx.in_my_zone(pid, r[2])]
+
+    if a.json:
+        print(json.dumps([{"similarity": s, "why": why,
+                           "a": anchors(cx, x), "b": anchors(cx, y)}
+                          for s, x, y, why in pairs], ensure_ascii=False, indent=2))
+        return 0
+
+    if not pairs:
+        print(grn("✓ расхождений между зонами не найдено"))
+        return 0
+
+    print(bold(f"Расхождения: {len(pairs)}"))
+    print(dim("  система не выбирает правильную сторону — она показывает обе.\n"
+              "  Расхождение и есть неопределённость, поэтому спор опускает уверенность\n"))
+    for s, x, y, why in pairs[:a.top]:
+        print(f"  {red('●')} {', '.join(why)}  {dim(f'сходство {s}')}")
+        for n in (x, y):
+            src = ", ".join(map(str, (n["sources"] or [])[:2]))
+            print(f"      {str(n.title)[:40]:40} {dim(f'[{n.id}]')}")
+            print(dim(f"        зона {cx.scope_of(n)} · владелец {n['owner']} · "
+                      f"CP {_num(cx.effective_cp(n))} · {n['captured_by']}"))
+            print(dim(f"        источник: {src or '—'}"))
+        print()
+
+    if a.mark:
+        marked = 0
+        for s, x, y, why in pairs:
+            for one, other in ((x, y), (y, x)):
+                cur = one["contradicts"] or []
+                if other.id not in cur:
+                    _add_field(one, "contradicts", "[" + ", ".join(cur + [other.id]) + "]")
+                _add_field(one, "disputed", "true")
+                marked += 1
+        print(grn(f"✓ помечено спорными: {marked} узлов"))
+        print(dim("  уверенность обеих сторон ограничена потолком спора из ladder.yaml.\n"
+                  "  Снять: cortex conflicts --resolve <node_id> --source <новый артефакт>"))
+    else:
+        print(dim("  пометить спорными: cortex conflicts --mark"))
+    return 0
+
+
+def _git_history(cx: Cortex, skip_re=None) -> dict:
+    """Когда каждый файл менялся по существу. Один проход по истории.
+
+    Технические коммиты (пересчёт свежести) отбрасываются: они трогают сотни
+    файлов сразу и превратили бы калибровку в замер собственной активности."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(cx.root), "log", "--name-only", "--format=%x00%cI%x00%s",
+             "--", "GROUND"], capture_output=True, text=True, timeout=60)
+    except Exception:
+        return {}
+    if out.returncode != 0:
+        return {}
+    hist, when, skip = defaultdict(list), None, False
+    for line in out.stdout.split("\n"):
+        if line.startswith("\x00"):
+            parts = line[1:].split("\x00")
+            when = parts[0].strip()[:10]
+            subject = parts[1] if len(parts) > 1 else ""
+            skip = bool(skip_re and re.search(skip_re, subject, re.I))
+        elif line.strip() and when and not skip:
+            hist[line.strip()].append(when)
+    return hist
+
+
+def _median(xs):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
+def cmd_calibrate(cx: Cortex, a):
+    """Разбор в конце квартала: где были уверены, а не сработало.
+    Инструмент показывает данные и предлагает правки — меняет правила человек."""
+    rates = cx.schema["profiles"].get("change_rate") or {}
+    conf = cx.schema["profiles"].get("calibration") or {}
+    hist = _git_history(cx, conf.get("skip_commits"))
+    onboarding_days = int(conf.get("onboarding_days", 14))
+    min_span = int(conf.get("min_observation_days", 45))
+    min_points = int(conf.get("min_changes", 3))
+
+    # --- 1. распад: наблюдаемая частота изменений против объявленной ---
+    decay_rows = []
+    for n in cx.nodes:
+        if n.layer != "curated" or n.path.stem in ("_index", "_registry"):
+            continue    # MOC меняется при каждом новом узле: это структурный шум,
+                        # а не частота изменений объекта реального мира
+        rel = "GROUND/" + str(n.path.relative_to(cx.ground))
+        dates = sorted({d for d in hist.get(rel, [])})
+        if len(dates) < 2:
+            continue
+        first = datetime.date.fromisoformat(dates[0])
+        last = datetime.date.fromisoformat(dates[-1])
+        if (last - first).days < min_span:
+            continue          # объект ещё не наблюдали достаточно долго
+        # Первые дни после заведения узла — это онбординг, а не жизнь объекта.
+        settled = [d for d in dates
+                   if (datetime.date.fromisoformat(d) - first).days >= onboarding_days]
+        if len(settled) < min_points:
+            continue
+        gaps = []
+        for i in range(1, len(settled)):
+            d1 = datetime.date.fromisoformat(settled[i - 1])
+            d2 = datetime.date.fromisoformat(settled[i])
+            gaps.append(abs((d2 - d1).days))
+        gaps = [g for g in gaps if g > 0]
+        if not gaps:
+            continue
+        observed = _median(gaps)
+        declared = n["change_rate"] or "unknown"
+        ttl = cx.ttl_for(n)
+        # Знание считалось свежим дольше, чем объект реально стоял на месте.
+        if observed and observed * 2 < ttl:
+            better = min(rates, key=lambda k: abs((rates[k] or {}).get("ttl_days", 90) - observed),
+                         default=None)
+            decay_rows.append((n, declared, observed, ttl, better))
+    decay_rows.sort(key=lambda r: r[2])
+
+    # --- 2. лестница: заявленная ступень против исхода ставок ---
+    bets = [n for n in cx.nodes if n["node_type"] == "bet" and n["outcome"] in ("met", "missed")]
+    by_step = defaultdict(lambda: [0, 0])
+    for b in bets:
+        step = int(b["cp"] or 0)
+        by_step[step][0 if b["outcome"] == "met" else 1] += 1
+    ladder_rows = [(step, met, missed) for step, (met, missed) in sorted(by_step.items())]
+    min_sample = int(conf.get("min_bets_per_step", 3))
+    overrated = [(s, m, ms) for s, m, ms in ladder_rows if ms >= m and (m + ms) >= min_sample]
+    thin = [(s, m, ms) for s, m, ms in ladder_rows if ms >= m and (m + ms) < min_sample]
+
+    # --- 3. слепые зоны: провал без единого артефакта ---
+    blind = [b for b in bets if b["outcome"] == "missed" and not (b["sources"] or [])]
+
+    if a.json:
+        print(json.dumps({
+            "decay": [{"node": n.id, "declared": d, "observed_days": o, "ttl_days": ttl,
+                       "suggest": better} for n, d, o, ttl, better in decay_rows],
+            "ladder": [{"step": s, "met": m, "missed": ms} for s, m, ms in ladder_rows],
+            "blind_spots": [b.id for b in blind],
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    L = []
+    w = L.append
+    w(bold("Калибровка"))
+    w(dim("  инструмент показывает данные и предлагает правки. Правила меняете вы,\n"
+          "  и только здесь: линейка, которую правят по ходу, показывает что угодно\n"))
+
+    w(bold("1. Срок годности против реальной частоты изменений"))
+    if not hist:
+        w(dim("  истории git нет — частоту изменений посчитать не из чего"))
+    elif not decay_rows:
+        w(dim("  расхождений нет: объявленные сроки годности соответствуют наблюдаемым"))
+    else:
+        w(dim(f"  узлов, где знание считалось свежим дольше, чем объект стоял на месте: "
+              f"{len(decay_rows)}"))
+        w(dim(f"  (первые {onboarding_days} дн. после заведения узла и технические коммиты "
+              f"не в счёт)\n"))
+        for n, declared, observed, ttl, better in decay_rows[:a.top]:
+            w(f"  {ylw('●')} {str(n.title)[:44]:44}")
+            w(dim(f"      объявлено {declared} (годен {ttl} дн.), "
+                  f"а менялся раз в {observed:.0f} дн. → ставить {better}"))
+    w("")
+
+    w(bold("2. Лестница против исходов"))
+    if not bets:
+        w(dim("  закрытых ставок нет: калибровать лестницу не на чем.\n"
+              "  Ставка закрывается полем outcome: met | missed"))
+    else:
+        w(f"  {'ступень':>8} {'сбылось':>9} {'сорвалось':>11}")
+        for s, m, ms in ladder_rows:
+            mark = red("●") if ms >= m else grn("●")
+            w(f"  {mark} {s:>6} {m:>9} {ms:>11}")
+        if overrated:
+            w("")
+            w(dim("  переоценённые ступени: заявлялись сильнее, чем оказались."))
+            for s, m, ms in overrated:
+                w(f"      ступень {s}: из {m + ms} обещаний доехало {m}")
+            w(dim("      → сдвиньте формулировку этой ступени вниз в SCHEMA/ladder.yaml"))
+        if thin:
+            w("")
+            w(dim(f"  данных мало (меньше {min_sample} ставок на ступень) — "
+                  f"это наблюдение, а не вывод:"))
+            for s, m, ms in thin:
+                w(dim(f"      ступень {s}: {m + ms} обещаний, доехало {m}"))
+    w("")
+
+    w(bold("3. Слепые зоны"))
+    if blind:
+        w(dim("  сорвалось без единого артефакта — здесь не хватало узла, а не усердия:"))
+        for b in blind[:a.top]:
+            w(f"  {red('●')} {b.title}")
+    else:
+        w(dim("  не обнаружено"))
+
+    text = "\n".join(L)
+    print(text)
+
+    if a.write:
+        d = cx.ground / "DECIDE" / "decisions"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / f"{TODAY}-calibration.md"
+        plain = re.sub(r"\033\[[0-9;]*m", "", text)
+        f.write_text(f"# Калибровка {TODAY}\n\n" + plain +
+                     "\n\n## Решение\n\n<что меняем в ladder.yaml и profiles.yaml и почему>\n",
+                     encoding="utf-8")
+        print(grn(f"\n✓ записано: {f.relative_to(cx.root)}"))
+        print(dim("  правки в правила вносите руками, отдельным коммитом"))
+    return 0
+
+
+def cmd_agenda(cx: Cortex, a):
+    """Пять минут в день: что требует внимания и почему именно сегодня."""
+    pid = active_profile(cx, a.as_profile)
+    lines = []
+    errs = [i for i in run_gate(cx) if i.sev == "ERROR"]
+    if errs:
+        lines.append((red("●"), f"память сломана: {len(errs)} ошибок гейта",
+                      "cortex gate --all"))
+
+    n_intake, age = _intake_age(cx)
+    if n_intake:
+        overdue = age is not None and age > a.queue_days
+        lines.append((red("●") if overdue else ylw("●"),
+                      f"очередь: {n_intake} записей" +
+                      (f", самой старой {age} дн." if age is not None else ""),
+                      "cortex intake list"))
+
+    drafts = [n for n in cx.nodes if n["status"] == "draft"]
+    if pid:
+        drafts = [n for n in drafts if str(n["captured_by"]) == f"profile:{pid}"] or drafts
+    if drafts:
+        lines.append((ylw("●"), f"ждёт вашей приёмки: {len(drafts)} узлов", "cortex review"))
+
+    scope_nodes = [n for n in cx.nodes if n.layer == "curated" and
+                   (not pid or cx.in_my_zone(pid, n))]
+    stale = [n for n in scope_nodes if cx.ripeness_of(n)[0] == "wilting"]
+    if stale:
+        lines.append((ylw("●"), f"протухло в вашей зоне: {len(stale)}",
+                      "cortex stale — верифицировать или понизить CP"))
+
+    if pid:
+        out, _ = _seams(cx, pid)
+        weak = [(n, f, tg) for n, f, tg in out if (cx.effective_cp(tg) or 9) <= 3]
+        if weak:
+            lines.append((red("●"),
+                          f"стыки на слабом звене: {len(weak)} — обещание не прочнее их",
+                          "cortex seams"))
+        subs_stale = [n for n in cx.profile_subs(pid) if cx.ripeness_of(n)[0] == "wilting"]
+        if subs_stale:
+            lines.append((ylw("●"), f"протухло в подписках: {len(subs_stale)}",
+                          "спросить владельца: " + ", ".join(
+                              sorted({str(n["owner"]) for n in subs_stale})[:3])))
+
+    drift = sum(1 for n in cx.nodes if n.layer in ("curated", "decisions")
+                and cx.ripeness_of(n)[0] and n["ripeness"] != cx.ripeness_of(n)[0])
+    if drift:
+        lines.append((dim("○"), f"вычисляемые поля разошлись у {drift} узлов",
+                      "cortex refresh"))
+
+    if a.json:
+        print(json.dumps({"profile": pid,
+                          "items": [{"text": txt, "action": act} for _, txt, act in lines]},
+                         ensure_ascii=False, indent=2))
+        return 0
+    head = f"Повестка{' · ' + pid if pid else ''}"
+    print(bold(head))
+    if not lines:
+        print(grn("  чисто — ничего не требует действия"))
+        return 0
+    print()
+    for mark, txt, act in lines:
+        print(f"  {mark} {txt}")
+        print(dim(f"      {act}"))
+    print(dim("\n  это пять минут в день: прочитать список и решить, что делаете вы, "
+              "а что подождёт"))
+    return 0
+
+
 def cmd_profiles(cx: Cortex, a):
     profs = cx.profiles()
     wrote = Counter(str(n["captured_by"]) for n in cx.nodes if n["captured_by"])
@@ -1836,6 +2230,20 @@ def main(argv=None):
     p.add_argument("--owner")
     p.add_argument("--types", action="append")
     p.add_argument("--purpose")
+    p = add("calibrate", cmd_calibrate, "итоги квартала: где были уверены, а не сработало")
+    p.add_argument("--write", action="store_true", help="записать разбор в DECIDE/decisions/")
+    p.add_argument("--top", type=int, default=12)
+    p.add_argument("--json", action="store_true")
+    p = add("conflicts", cmd_conflicts, "расхождения между зонами: обе стороны, без выбора")
+    p.add_argument("--mark", action="store_true", help="пометить спорными и ограничить CP")
+    p.add_argument("--resolve", help="снять спор с узла (требует --source)")
+    p.add_argument("--source", action="append")
+    p.add_argument("--top", type=int, default=10)
+    p.add_argument("--json", action="store_true")
+    p = add("agenda", cmd_agenda, "пять минут в день: что требует внимания")
+    p.add_argument("--queue-days", dest="queue_days", type=int, default=3,
+                   help="через сколько дней очередь считается просроченной")
+    p.add_argument("--json", action="store_true")
     p = add("pack", cmd_pack, "собрать срез памяти под профиль")
     p.add_argument("--out")
     p.add_argument("--stdout", action="store_true")

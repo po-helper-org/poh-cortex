@@ -18,6 +18,7 @@ depends_on: [<node_id узла-зависимости>]
 sources: [<файл из evidence/>]
 jira: [KEY-000]
 captured_by: human
+outcome: <met | missed — заполняется при закрытии; вход калибровки>
 updated: <ГГГГ-ММ-ДД>
 ---
 ```

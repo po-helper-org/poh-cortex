@@ -26,5 +26,6 @@ fields:
   involves:          {edge: INVOLVES}
   affects:           {edge: AFFECTS}
   supersedes:        {edge: SUPERSEDES}
+  contradicts:       {edge: CONTRADICTS}
   nexus_refs:        {edge: REFERS_TO,    external: true}
   evidences:         {edge: EVIDENCED_BY, external: true}

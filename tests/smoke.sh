@@ -46,6 +46,10 @@ check "стыки считаются"              0 --as po-gds seams
 check "срез собирается"              0 --as po-gds pack --stdout
 check "срезы всех профилей"          0 pack --all
 check "срез без профиля отклонён"    2 pack --stdout
+check "повестка дня собирается"      0 agenda
+check "расхождения ищутся"           0 conflicts
+check "калибровка считается"         0 calibrate
+check "снятие спора без источника"   2 conflicts --resolve ops-agent-contract
 # Узел берём из самого vault: тест не должен знать чужое содержимое.
 NODE=$("$ROOT/bin/cortex" --root "$VAULT" ask память продукт цель --json 2>/dev/null \
   | python3 -c "import json,sys;d=json.load(sys.stdin)['answer_from'];print(next((x['node_id'] for x in d if x.get('node_id') and x.get('cp') is not None and x['cp']<9),''))" 2>/dev/null)

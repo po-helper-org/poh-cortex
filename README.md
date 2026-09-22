@@ -51,6 +51,9 @@ bin/cortex gate          ноль ERROR на чистом клоне
 | новый объект управления | `/paf-nexus-create` |
 | гейт красный | `/paf-gate` |
 | спросить память | `/cortex-ask` |
+| что требует внимания сегодня | `bin/cortex agenda` |
+| расхождения между зонами | `bin/cortex conflicts` |
+| итоги квартала | `bin/cortex calibrate` |
 | обещание с датой | `/cortex-bet` |
 
 ## Структура
