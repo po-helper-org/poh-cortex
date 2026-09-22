@@ -42,17 +42,44 @@ check "неизвестный профиль отклонён" 2 --as нет-т�
 check "срез без профиля отклонён"    2 pack --stdout
 check "срезы всех профилей"          0 pack --all
 
-# Профиль берём из самого vault: тест не знает, как их назвали у вас.
-PROFILE=$("$ROOT/bin/cortex" --root "$VAULT" profiles --json 2>/dev/null \
-  | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[0]['id'] if d else '')" 2>/dev/null)
+# Значение берём из самого vault: тест не знает, как их назвали у вас.
+# Три исхода различаются намеренно: успех, пустой результат (штатный пропуск)
+# и сбой чтения или разбора — провал. Молча пропущенная проверка выглядит как
+# пройденная, а это худший вид зелёного.
+read_json () {  # read_json <что читаем> <python-выражение> <аргументы cortex...>
+  local what="$1" expr="$2"; shift 2
+  local raw parsed
+  if ! raw=$("$ROOT/bin/cortex" --root "$VAULT" "$@" 2>&1); then
+    echo "  FAIL $what: команда завершилась с ошибкой"
+    printf '%s\n' "$raw" | tail -1 | sed 's/^/       /'
+    fail=$((fail + 1))
+    READ_JSON=""; READ_OK=0
+    return 1
+  fi
+  if ! parsed=$(printf '%s' "$raw" | python3 -c "$expr" 2>&1); then
+    echo "  FAIL $what: JSON не разобрался — изменился формат вывода?"
+    printf '%s\n' "$parsed" | tail -1 | sed 's/^/       /'
+    fail=$((fail + 1))
+    READ_JSON=""; READ_OK=0
+    return 1
+  fi
+  READ_JSON="$parsed"; READ_OK=1
+}
+
+read_json "профили" \
+  "import json,sys;d=json.load(sys.stdin);print(d[0]['id'] if d else '')" \
+  profiles --json
+PROFILE="$READ_JSON"
 if [ -n "$PROFILE" ]; then
   check "профиль не пишет в ядро"      2 --as "$PROFILE" node new --nexus team --type person --title X --source y --scope org
   check "профиль не пишет в чужую зону" 2 --as "$PROFILE" node new --nexus product --type feature --title X --source y --scope "team:посторонняя"
   check "стыки считаются"              0 --as "$PROFILE" seams
   check "--as после подкоманды"        0 seams --as "$PROFILE"
   check "срез профиля собирается"      0 --as "$PROFILE" pack --stdout
+elif [ "$READ_OK" = 1 ]; then
+  echo "  --   профилей не объявлено: проверки зон пропущены (это штатно)"
 else
-  echo "  --   профилей не объявлено: проверки зон пропущены"
+  echo "  --   профили прочитать не удалось: проверки зон НЕ выполнены"
 fi
 check "повестка дня собирается"      0 agenda
 check "расхождения ищутся"           0 conflicts
@@ -61,12 +88,13 @@ check "калибровка считается"         0 calibrate
 # Нужен узел знания (NEXUS), а не операционная запись: резолвер отвечает про
 # сущности, а не про дневник, и ступень должна быть ниже девятой, чтобы
 # проверка отказа на росте CP имела смысл.
-NODE=$("$ROOT/bin/cortex" --root "$VAULT" ask память продукт цель --json 2>/dev/null \
-  | python3 -c "import json,sys
+read_json "узлы знания" "import json,sys
 d = json.load(sys.stdin)['answer_from']
 print(next((x['node_id'] for x in d
             if x.get('node_id') and x.get('cp') is not None and x['cp'] < 9
-            and 'NEXUS/' in (x.get('path') or '')), ''))" 2>/dev/null)
+            and 'NEXUS/' in (x.get('path') or '')), ''))" \
+  ask память продукт цель --json
+NODE="$READ_JSON"
 if [ -n "$NODE" ]; then
   check "проверка узла отвечает"       0 node check "$NODE"
   check "рост CP без источника отклонён" 2 node set "$NODE" --cp 9
@@ -82,8 +110,10 @@ if [ -n "$NODE" ]; then
     echo "  FAIL резолвер не нашёл существующий узел"
     fail=$((fail + 1))
   fi
+elif [ "$READ_OK" = 1 ]; then
+  echo "  --   узлов знания нет: проверки контракта обновления пропущены (это штатно)"
 else
-  echo "  --   узлов для проверки контракта обновления нет (пустая память)"
+  echo "  --   узлы прочитать не удалось: проверки контракта НЕ выполнены"
 fi
 
 echo
