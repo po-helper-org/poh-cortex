@@ -36,8 +36,15 @@ check "узел без источника отклонён"  2 node new --nexus 
 check "чужой Нексус отклонён"        2 node new --nexus nope --type feature --title x --source y
 check "висячее ребро отклонено"      2 node new --nexus product --type feature --title x --source y --satisfies kr-нет
 check "неизвестный тип отклонён"     2 node new --nexus product --type выдумка --title x --source y
-check "рост CP без источника отклонён" 2 node set ops-delegation-boundary --cp 9
-check "проверка узла отвечает"       0 node check ops-agent-contract
+# Узел берём из самого vault: тест не должен знать чужое содержимое.
+NODE=$("$ROOT/bin/cortex" --root "$VAULT" ask память продукт цель --json 2>/dev/null \
+  | python3 -c "import json,sys;d=json.load(sys.stdin)['answer_from'];print(next((x['node_id'] for x in d if x.get('node_id') and x.get('cp') is not None and x['cp']<9),''))" 2>/dev/null)
+if [ -n "$NODE" ]; then
+  check "проверка узла отвечает"       0 node check "$NODE"
+  check "рост CP без источника отклонён" 2 node set "$NODE" --cp 9
+else
+  echo "  --   узлов для проверки контракта обновления нет (пустая память)"
+fi
 
 echo
 if [ "$fail" = 0 ]; then
