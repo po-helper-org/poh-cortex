@@ -897,9 +897,21 @@ def _setup_todo(cx: Cortex):
     cfg = cx.ground / "config.yaml"
     if cfg.exists():
         cfg_text = cfg.read_text(encoding="utf-8")
-    if re.search(r"<[^<>]{2,}>", cfg_text):
-        todo.append(("организация, продукт и роли не заданы",
-                     "cortex init — или заполните GROUND/config.yaml руками"))
+    holes, last_key = [], None
+    for line in cfg_text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        kv = _kv_split(line.strip())
+        if kv:
+            last_key = kv[0].strip()
+        if re.search(r"<[^<>]{2,}>", line):
+            # плейсхолдер может стоять в блочном значении — тогда имя ключа выше
+            name = (kv[0].strip() if kv else last_key) or "?"
+            if name not in holes:
+                holes.append(name)
+    if holes:
+        todo.append((f"в config.yaml не заполнено: {', '.join(holes[:5])}",
+                     "cortex init или правка GROUND/config.yaml руками"))
 
     profs = cx.profiles()
     if not profs:
@@ -971,8 +983,12 @@ def cmd_refresh(cx: Cortex, a):
         if n["ripeness"] != rip:
             updates["ripeness"] = rip
         ecp = cx.effective_cp(n)
-        if ecp is not None and n["cp"] is not None and n["effective_cp"] != ecp:
-            updates["effective_cp"] = ecp
+        cp = cx.cp_of(n)
+        if ecp is not None and n["cp"] is not None:
+            if ecp != cp and n["effective_cp"] != ecp:
+                updates["effective_cp"] = _num(ecp)      # распад или спор сняли ступени
+            elif ecp == cp and n["effective_cp"] is not None:
+                updates["effective_cp"] = None           # поле-дубль убирается
         if not updates:
             continue
         changed += 1
@@ -981,7 +997,9 @@ def cmd_refresh(cx: Cortex, a):
             continue
         text = n.path.read_text(encoding="utf-8")
         for k, v in updates.items():
-            if re.search(rf"^{k}:.*$", text, re.M):
+            if v is None:
+                text = re.sub(rf"^{k}:.*\n", "", text, count=1, flags=re.M)
+            elif re.search(rf"^{k}:.*$", text, re.M):
                 text = re.sub(rf"^{k}:.*$", f"{k}: {v}", text, count=1, flags=re.M)
             else:
                 text = text.replace("---\n", f"---\n{k}: {v}\n", 1)
