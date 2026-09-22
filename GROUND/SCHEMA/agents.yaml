@@ -84,30 +84,35 @@ never_delegated:
 #
 # subscriptions — что из ядра для профиля горячее: влияет на срез и на то,
 # чьё увядание показывается ему как срочное. Это интерес профиля, а не
-# свойство узла: одна и та же витрина для одного PO меняется ежедневно,
+# свойство узла: один и тот же объект для одного PO меняется ежедневно,
 # для другого — стабильная внешняя система.
 
 profiles:
-  - id: po-gds
-    name: "PO команды GDS"
+  # ОБРАЗЦЫ. Замените на свои профили и удалите эти два: они существуют только
+  # чтобы инструмент и тесты работали на свежем клоне.
+  #
+  # id           — имя профиля; им же агент представляется: CORTEX_PROFILE=<id>
+  # writes       — зоны, где профиль пишет напрямую. Список, а не одно значение:
+  #                зоны пересекаются, когда продукт связный
+  # subscriptions— что из чужого профилю нужно часто (узлом или nexus:<slug>)
+
+  - id: po-example-a
+    name: "PO команды A"
     person: "<ФИО>"
-    writes: [team:GDS]
+    writes: ["team:a"]
     subscriptions: []
 
-  - id: po-live
-    name: "PO команды Live"
+  - id: po-example-b
+    name: "PO команды B"
     person: "<ФИО>"
-    writes: [team:Live]
+    writes: ["team:b"]
     subscriptions: []
 
-  # Пример пересечения: конверсия витрины и GDS оба пишут про витрину.
-  # Зона product:vitrina перечислена у обоих — это не ошибка конфигурации.
-  # - {id: po-conversion, name: "PO конверсии витрины", person: "<ФИО>",
-  #    writes: ["product:vitrina"], subscriptions: [system-vitrina]}
-  # - {id: po-fintech, name: "PO финтеха", person: "<ФИО>",
-  #    writes: ["team:fintech"], subscriptions: [system-vitrina]}
-  # - {id: po-partners, name: "PO партнёрских продаж", person: "<ФИО>",
-  #    writes: ["team:partners"], subscriptions: []}
+  # Пересечение зон выглядит так: два профиля перечисляют одну зону продукта.
+  # Это не ошибка конфигурации, а обычное состояние связного продукта.
+  #
+  # - {id: po-example-a, name: "...", writes: ["team:a", "product:общий"], subscriptions: ["nexus:landscape"]}
+  # - {id: po-example-b, name: "...", writes: ["team:b", "product:общий"], subscriptions: [sys-общая-система]}
 
 # Ядро организации: люди, оргструктура, IT-ландшафт, процессы, комплаенс.
 # У него один ответственный — он принимает изменения по качеству, день ко дню,

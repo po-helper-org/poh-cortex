@@ -875,8 +875,65 @@ def cmd_doctor(cx: Cortex, a):
         print(f"  {mark} {k:26} {v}")
     layers = Counter(n.layer for n in cx.nodes)
     print("\n  слои памяти: " + ", ".join(f"{k}={v}" for k, v in sorted(layers.items())))
+
+    todo = _setup_todo(cx)
+    if todo:
+        print(bold("\n  Кортекс ещё не настроен — с этого начинают:"))
+        for i, (what, how) in enumerate(todo, 1):
+            print(f"    {ylw(str(i) + '.')} {what}")
+            print(dim(f"       {how}"))
+        print(dim("\n  порядок и вопросы для интервью — ONBOARDING.md, раздел «Настройка»"))
+    else:
+        print(grn("\n  ✓ настройка завершена — можно наполнять память"))
     print(dim("\n  всё считается из markdown при каждом запуске; индекс не хранится"))
     return 0
+
+
+def _setup_todo(cx: Cortex):
+    """Чего не хватает, чтобы Кортекс стал памятью конкретной организации.
+    Агент проходит этот список с человеком — он не заполняет его сам."""
+    todo = []
+    cfg_text = ""
+    cfg = cx.ground / "config.yaml"
+    if cfg.exists():
+        cfg_text = cfg.read_text(encoding="utf-8")
+    if re.search(r"<[^<>]{2,}>", cfg_text):
+        todo.append(("организация, продукт и роли не заданы",
+                     "cortex init — или заполните GROUND/config.yaml руками"))
+
+    profs = cx.profiles()
+    if not profs:
+        todo.append(("не объявлено ни одного профиля PO",
+                     "SCHEMA/agents.yaml → profiles: кто ведёт какую зону"))
+    elif all(str(pid).startswith("po-example") for pid in profs):
+        todo.append(("профили — образцы из шаблона",
+                     "замените po-example-* на свои в SCHEMA/agents.yaml и удалите образцы"))
+
+    cur = cx.core_curator()
+    if not cur or cur.startswith("<"):
+        todo.append(("куратор ядра не назначен",
+                     "SCHEMA/agents.yaml → core.curator; без него увядание ядра ничьё"))
+
+    ladder = (cx.schema["ladder"].get("steps") or {})
+    if ladder and not any((v or {}).get("yours") for v in ladder.values()):
+        todo.append(("лестница доказательств не откалибрована под ваш домен",
+                     "SCHEMA/ladder.yaml → steps[*].yours: чем в вашем контуре "
+                     "подтверждается каждая ступень"))
+
+    empty = [s for s in cx.nexuses
+             if not any(n["nexus"] == s and n.path.stem != "_index" for n in cx.nodes)]
+    if len(empty) == len(cx.nexuses):
+        todo.append(("ни один Нексус не наполнен",
+                     "ONBOARDING.md, шаг 2: интервью по одному Нексусу за раз"))
+    elif empty:
+        todo.append((f"не наполнено Нексусов: {len(empty)} из {len(cx.nexuses)}",
+                     "оставшиеся: " + ", ".join(sorted(empty)[:6])))
+
+    spine = [n for n in cx.nodes if n["node_type"] in ("objective", "key-result")]
+    if not spine:
+        todo.append(("нет целей квартала — достижимость не считается",
+                     "ROADMAP/kr-epic-map.md, затем cortex gaps"))
+    return todo
 
 
 def cmd_gate(cx: Cortex, a):
@@ -2081,6 +2138,11 @@ def cmd_agenda(cx: Cortex, a):
 
 def cmd_profiles(cx: Cortex, a):
     profs = cx.profiles()
+    if getattr(a, "json", False):
+        print(json.dumps([{"id": pid, "name": pr.get("name"), "writes": cx.profile_writes(pid),
+                           "subscriptions": [n.id for n in cx.profile_subs(pid)]}
+                          for pid, pr in profs.items()], ensure_ascii=False, indent=2))
+        return 0
     wrote = Counter(str(n["captured_by"]) for n in cx.nodes if n["captured_by"])
     drafts = Counter(str(n["captured_by"]) for n in cx.nodes if n["status"] == "draft")
     active = active_profile(cx, a.as_profile)
@@ -2267,6 +2329,7 @@ def main(argv=None):
     p.add_argument("--top", type=int, default=3)
     p.add_argument("--json", action="store_true")
     p = add("profiles", cmd_profiles, "профили PO: зоны, подписки, что каждый записал")
+    p.add_argument("--json", action="store_true")
     p = add("schema", cmd_schema, "схема памяти: показать или завести свою")
     p.add_argument("action", choices=["show", "init"], nargs="?", default="show")
     add("init", cmd_init, "привязать vault к организации")

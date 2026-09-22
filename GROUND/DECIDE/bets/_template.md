@@ -16,7 +16,7 @@ window: <когда результат нужен потребителю и по
 satisfies: [<node_id ключевого результата>]
 depends_on: [<node_id узла-зависимости>]
 sources: [<файл из evidence/>]
-jira: [KEY-000]
+tracker: [KEY-000]        # ключи задач в вашем трекере
 captured_by: human
 outcome: <met | missed — заполняется при закрытии; вход калибровки>
 updated: <ГГГГ-ММ-ДД>

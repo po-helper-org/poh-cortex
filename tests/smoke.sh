@@ -40,12 +40,20 @@ check "профили перечислены"          0 profiles
 check "очередь приёмки отвечает"     0 review
 check "резолвер отвечает"            0 resolve контракт агентов
 check "неизвестный профиль отклонён" 2 --as нет-такого profiles
-check "профиль не пишет в ядро"      2 --as po-gds node new --nexus team --type person --title X --source y --scope org
-check "профиль не пишет в чужую зону" 2 --as po-gds node new --nexus product --type feature --title X --source y --scope team:Live
-check "стыки считаются"              0 --as po-gds seams
-check "срез собирается"              0 --as po-gds pack --stdout
-check "срезы всех профилей"          0 pack --all
 check "срез без профиля отклонён"    2 pack --stdout
+check "срезы всех профилей"          0 pack --all
+
+# Профиль берём из самого vault: тест не знает, как их назвали у вас.
+PROFILE=$("$ROOT/bin/cortex" --root "$VAULT" profiles --json 2>/dev/null \
+  | python3 -c "import json,sys;d=json.load(sys.stdin);print(d[0]['id'] if d else '')" 2>/dev/null)
+if [ -n "$PROFILE" ]; then
+  check "профиль не пишет в ядро"      2 --as "$PROFILE" node new --nexus team --type person --title X --source y --scope org
+  check "профиль не пишет в чужую зону" 2 --as "$PROFILE" node new --nexus product --type feature --title X --source y --scope "team:посторонняя"
+  check "стыки считаются"              0 --as "$PROFILE" seams
+  check "срез профиля собирается"      0 --as "$PROFILE" pack --stdout
+else
+  echo "  --   профилей не объявлено: проверки зон пропущены"
+fi
 check "повестка дня собирается"      0 agenda
 check "расхождения ищутся"           0 conflicts
 check "калибровка считается"         0 calibrate
