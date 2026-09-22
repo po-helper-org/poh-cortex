@@ -1649,7 +1649,8 @@ def cmd_pack(cx: Cortex, a):
 
     curated = [n for n in cx.nodes if n.layer in ("curated", "decisions") and n.id
                and n["status"] != "rejected"]
-    mine = sorted([n for n in curated if cx.in_my_zone(pid, n)], key=lambda n: (n["nexus"] or "", n.id))
+    mine = sorted([n for n in curated if cx.in_my_zone(pid, n)],
+                  key=lambda n: (str(n["nexus"] or ""), str(n.id)))
     subs = [n for n in cx.profile_subs(pid) if not cx.in_my_zone(pid, n)]
     out_seams, in_seams = _seams(cx, pid)
     core = sorted([n for n in curated if cx.scope_of(n) == "org" and n not in subs],
@@ -1717,11 +1718,12 @@ def cmd_pack(cx: Cortex, a):
 
     by_nexus = defaultdict(list)
     for n in mine:
-        by_nexus[n["nexus"]].append(n)
+        # У слоя решений нет Нексуса: ставка и артефакт ему не принадлежат.
+        by_nexus[n["nexus"] or "решения"].append(n)
     if mine:
         w("## Ваша зона")
         w("")
-        for nx, ns in sorted(by_nexus.items()):
+        for nx, ns in sorted(by_nexus.items(), key=lambda kv: str(kv[0])):
             w(f"### {nx}")
             w("")
             for n in ns:

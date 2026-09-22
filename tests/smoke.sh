@@ -38,7 +38,6 @@ check "висячее ребро отклонено"      2 node new --nexus pro
 check "неизвестный тип отклонён"     2 node new --nexus product --type выдумка --title x --source y
 check "профили перечислены"          0 profiles
 check "очередь приёмки отвечает"     0 review
-check "резолвер отвечает"            0 resolve контракт агентов
 check "неизвестный профиль отклонён" 2 --as нет-такого profiles
 check "срез без профиля отклонён"    2 pack --stdout
 check "срезы всех профилей"          0 pack --all
@@ -58,13 +57,31 @@ fi
 check "повестка дня собирается"      0 agenda
 check "расхождения ищутся"           0 conflicts
 check "калибровка считается"         0 calibrate
-check "снятие спора без источника"   2 conflicts --resolve ops-agent-contract
 # Узел берём из самого vault: тест не должен знать чужое содержимое.
+# Нужен узел знания (NEXUS), а не операционная запись: резолвер отвечает про
+# сущности, а не про дневник, и ступень должна быть ниже девятой, чтобы
+# проверка отказа на росте CP имела смысл.
 NODE=$("$ROOT/bin/cortex" --root "$VAULT" ask память продукт цель --json 2>/dev/null \
-  | python3 -c "import json,sys;d=json.load(sys.stdin)['answer_from'];print(next((x['node_id'] for x in d if x.get('node_id') and x.get('cp') is not None and x['cp']<9),''))" 2>/dev/null)
+  | python3 -c "import json,sys
+d = json.load(sys.stdin)['answer_from']
+print(next((x['node_id'] for x in d
+            if x.get('node_id') and x.get('cp') is not None and x['cp'] < 9
+            and 'NEXUS/' in (x.get('path') or '')), ''))" 2>/dev/null)
 if [ -n "$NODE" ]; then
   check "проверка узла отвечает"       0 node check "$NODE"
   check "рост CP без источника отклонён" 2 node set "$NODE" --cp 9
+  # Спор снимают только новым источником — узел существует, значит отказ
+  # будет именно по этой причине, а не из-за ненайденного id.
+  check "снятие спора без источника"   2 conflicts --resolve "$NODE"
+  # Резолвер должен именно НАХОДИТЬ, а не просто завершаться успешно.
+  if "$ROOT/bin/cortex" --root "$VAULT" resolve "$NODE" --json 2>/dev/null \
+       | python3 -c "import json,sys;sys.exit(0 if json.load(sys.stdin) else 1)"; then
+    echo "  ok   резолвер находит узел по имени"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL резолвер не нашёл существующий узел"
+    fail=$((fail + 1))
+  fi
 else
   echo "  --   узлов для проверки контракта обновления нет (пустая память)"
 fi
