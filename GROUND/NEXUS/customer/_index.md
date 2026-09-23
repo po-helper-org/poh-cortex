@@ -6,6 +6,8 @@ paf_step: 2
 sprint_phase: null
 kind: empirical
 owner: Product Engineer
+scope: org
+captured_by: human
 confidence: 0.2
 sources: []
 updated: 2026-08-20

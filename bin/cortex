@@ -1,0 +1,2476 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Кортекс — память организации для ИИ-агентов PO.
+
+Один файл, только стандартная библиотека. Без движка, без БД, без venv.
+Схема памяти живёт данными в GROUND/SCHEMA/*.yaml, а не в этом коде:
+новый агент расширяет память декларацией, а не правкой инструмента.
+
+  cortex doctor | gate | refresh | report | ask | context | who | stale | gaps
+  cortex node new|check|set | intake list|route | agents | init
+
+Носитель истины — markdown в git. Индекс строится в памяти на каждый запуск
+(422 узла ≈ 0.2 c) и не хранится: производный артефакт не бывает истиной.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import fnmatch
+import json
+import os
+import pathlib
+import re
+import sys
+import unicodedata
+from collections import Counter, defaultdict
+
+VERSION = "2.0.0"
+TODAY = datetime.date.today()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# мини-YAML: подмножество, которого хватает фронтматтеру и конфигам Кортекса.
+# Поддержано: скаляры, кавычки, inline-списки и словари, блочные списки,
+# вложенные словари по отступу, блочные скаляры > и |, комментарии.
+# Не поддержано сознательно: якоря, теги, многодокументность, сложные ключи.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+class YamlError(ValueError):
+    pass
+
+
+def _strip_comment(s: str) -> str:
+    out, quote = [], None
+    for i, ch in enumerate(s):
+        if quote:
+            out.append(ch)
+            if ch == quote and (i == 0 or s[i - 1] != "\\"):
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+            out.append(ch)
+            continue
+        if ch == "#" and (not out or out[-1] in " \t"):
+            break
+        out.append(ch)
+    return "".join(out).rstrip()
+
+
+def _scalar(v: str):
+    v = v.strip()
+    if v == "" or v in ("~", "null", "Null", "NULL"):
+        return None
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        inner = v[1:-1]
+        if v[0] == "'":
+            return inner.replace("''", "'")
+        # Двойные кавычки несут escape-последовательности, как того требует YAML.
+        out, i = [], 0
+        while i < len(inner):
+            ch = inner[i]
+            if ch == "\\" and i + 1 < len(inner):
+                nxt = inner[i + 1]
+                out.append({"n": "\n", "t": "\t", "r": "\r", "0": "\0",
+                            "\\": "\\", '"': '"', "/": "/"}.get(nxt, "\\" + nxt))
+                i += 2
+                continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
+    low = v.lower()
+    if low in ("true", "yes"):
+        return True
+    if low in ("false", "no"):
+        return False
+    if _NUM_RE.match(v):
+        return float(v) if "." in v else int(v)
+    return v
+
+
+def _split_flow(body: str) -> list[str]:
+    """Разбить содержимое [..] или {..} по запятым верхнего уровня."""
+    parts, buf, depth, quote = [], [], 0, None
+    for ch in body:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf.append(ch)
+            continue
+        if ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+            continue
+        buf.append(ch)
+    if "".join(buf).strip():
+        parts.append("".join(buf))
+    return [p.strip() for p in parts]
+
+
+def _flow(v: str):
+    v = v.strip()
+    if v.startswith("[") and v.endswith("]"):
+        return [_flow(p) for p in _split_flow(v[1:-1])]
+    if v.startswith("{") and v.endswith("}"):
+        out = {}
+        for p in _split_flow(v[1:-1]):
+            if ":" not in p:
+                continue
+            k, _, val = p.partition(":")
+            out[_scalar(k)] = _flow(val)
+        return out
+    return _scalar(v)
+
+
+def _balanced(s: str) -> bool:
+    depth, quote = 0, None
+    for ch in s:
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+    return depth <= 0
+
+
+def _kv_split(line: str):
+    """Разделить 'ключ: значение'. Двоеточие внутри слова (daybook:2026-08-08)
+    парой не считается — это скаляр, как и требует YAML."""
+    depth, quote = 0, None
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+            continue
+        if ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+        elif ch == ":" and depth == 0 and (i + 1 == len(line) or line[i + 1] in " \t"):
+            return line[:i], line[i + 1:]
+    return None
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def yaml_parse(text: str):
+    lines = text.replace("\t", "    ").split("\n")
+    value, _ = _parse_block(lines, 0, 0)
+    return value if value is not None else {}
+
+
+def _parse_block(lines: list[str], i: int, indent: int):
+    """Разобрать блок с отступом >= indent. Вернуть (значение, следующий индекс)."""
+    result = None
+    while i < len(lines):
+        raw = lines[i]
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            i += 1
+            continue
+        cur = _indent(raw)
+        if cur < indent:
+            break
+        line = _strip_comment(raw).strip()
+        if not line:
+            i += 1
+            continue
+        # Поток ([...] или {...}) может занимать несколько строк — дочитываем.
+        while ("[" in line or "{" in line) and not _balanced(line) and i + 1 < len(lines):
+            i += 1
+            line = line + " " + _strip_comment(lines[i]).strip()
+
+        if line.startswith("- "):
+            if result is None:
+                result = []
+            if not isinstance(result, list):
+                break
+            item = line[2:].strip()
+            if item.startswith(("[", "{")):
+                result.append(_flow(item))
+                i += 1
+            elif _kv_split(item) and not item.startswith(("\"", "'")):
+                # элемент-словарь: первая пара стоит на той же строке, остальные ниже.
+                synthetic = [" " * (cur + 2) + item] + lines[i + 1:]
+                sub, consumed = _parse_block(synthetic, 0, cur + 2)
+                result.append(sub)
+                i += consumed          # synthetic[k] соответствует lines[i+k]
+            else:
+                result.append(_scalar(item))
+                i += 1
+            continue
+        if line == "-":
+            if result is None:
+                result = []
+            sub, i = _parse_block(lines, i + 1, cur + 1)
+            result.append(sub)
+            continue
+
+        kv = _kv_split(line)
+        if kv is None:
+            i += 1
+            continue
+        key, rest = _scalar(kv[0].strip()), kv[1].strip()
+        if result is None:
+            result = {}
+        if not isinstance(result, dict):
+            break
+
+        if rest in (">", "|", ">-", "|-", ">+", "|+"):
+            buf, j = [], i + 1
+            while j < len(lines):
+                if lines[j].strip() and _indent(lines[j]) <= cur:
+                    break
+                buf.append(lines[j][cur + 1:] if len(lines[j]) > cur else "")
+                j += 1
+            joined = "\n".join(buf).strip("\n")
+            if rest.startswith(">"):
+                joined = " ".join(x.strip() for x in joined.split("\n") if x.strip())
+            result[key] = joined
+            i = j
+            continue
+        if rest == "":
+            # Блок ниже ключа: вложенный словарь с отступом ИЛИ список,
+            # который YAML разрешает держать на одном уровне с ключом.
+            j = i + 1
+            while j < len(lines) and (not lines[j].strip() or lines[j].lstrip().startswith("#")):
+                j += 1
+            child = cur + 1
+            if j < len(lines) and _indent(lines[j]) == cur:
+                nxt = _strip_comment(lines[j]).strip()
+                if nxt == "-" or nxt.startswith("- "):
+                    child = cur
+            sub, j = _parse_block(lines, i + 1, child)
+            result[key] = sub if sub is not None else None
+            i = j
+            continue
+        result[key] = _flow(rest)
+        i += 1
+    return result, i
+
+
+def _q(v: str) -> str:
+    s = str(v)
+    return '"%s"' % s.replace('"', '\\"') if re.search(r'[:#\[\]{},\'"]|^\s|\s$', s) else s
+
+
+def yaml_dump(data: dict, indent: int = 0) -> str:
+    out = []
+    pad = " " * indent
+    for k, v in data.items():
+        if v is None:
+            out.append(f"{pad}{k}: null")
+        elif isinstance(v, bool):
+            out.append(f"{pad}{k}: {'true' if v else 'false'}")
+        elif isinstance(v, (int, float)):
+            out.append(f"{pad}{k}: {v}")
+        elif isinstance(v, list):
+            if not v:
+                out.append(f"{pad}{k}: []")
+            elif all(not isinstance(x, (dict, list)) for x in v):
+                out.append(f"{pad}{k}: [{', '.join(_q(x) for x in v)}]")
+            else:
+                out.append(f"{pad}{k}:")
+                for x in v:
+                    if isinstance(x, dict):
+                        body = yaml_dump(x, 0).split("\n")
+                        out.append(f"{pad}  - {body[0]}")
+                        out.extend(f"{pad}    {b}" for b in body[1:] if b)
+                    else:
+                        out.append(f"{pad}  - {_q(x)}")
+        elif isinstance(v, dict):
+            out.append(f"{pad}{k}:")
+            out.append(yaml_dump(v, indent + 2))
+        else:
+            out.append(f"{pad}{k}: {_q(v)}")
+    return "\n".join(x for x in out if x != "")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# модель памяти
+# ──────────────────────────────────────────────────────────────────────────────
+
+FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
+
+
+class Node:
+    __slots__ = ("path", "rel", "fm", "body", "layer")
+
+    def __init__(self, path: pathlib.Path, root: pathlib.Path, fm: dict, body: str, layer: str):
+        self.path, self.rel, self.fm, self.body, self.layer = path, str(path.relative_to(root)), fm, body, layer
+
+    def __getitem__(self, k):
+        return self.fm.get(k)
+
+    @property
+    def id(self):
+        return self.fm.get("node_id")
+
+    @property
+    def title(self):
+        return self.fm.get("title") or (self.fm.get("node_id") or self.path.stem)
+
+
+class Cortex:
+    """Загруженный vault: схема, реестр, узлы. Строится на каждый запуск."""
+
+    LAYERS = {"NEXUS": "curated", "PULSE": "operational", "DECIDE": "decisions",
+              "_intake": "intake", "_index": "derived", "SCHEMA": "schema"}
+
+    def __init__(self, root: pathlib.Path):
+        self.root = root
+        self.ground = root / "GROUND"
+        self.schema = self._load_schema()
+        self.config = self._read_yaml(self.ground / "config.yaml") or {}
+        self.registry = self._read_yaml(self.ground / "NEXUS" / "_registry.yaml") or {}
+        self.nexuses = {n.get("slug"): n for n in (self.registry.get("nexus_types") or []) if n.get("slug")}
+        self.nodes: list[Node] = []
+        self.by_id: dict[str, Node] = {}
+        self.dupes: list[tuple[str, str, str]] = []
+        self._load_nodes()
+
+    # --- загрузка ---
+
+    @staticmethod
+    def _read_yaml(p: pathlib.Path):
+        if not p.exists():
+            return None
+        try:
+            return yaml_parse(p.read_text(encoding="utf-8"))
+        except Exception as e:  # схема не должна падать трассировкой
+            raise YamlError(f"{p}: {e}")
+
+    SCHEMA_FILES = ("nodes", "edges", "profiles", "agents", "ladder", "checks", "gates")
+
+    def schema_dir(self) -> pathlib.Path:
+        """Схема vault, а если её ещё нет — та, с которой поставлен инструмент.
+        Так Кортекс работает на любом существующем vault без миграции."""
+        own = self.ground / "SCHEMA"
+        if (own / "nodes.yaml").exists():
+            return own
+        shipped = pathlib.Path(__file__).resolve().parent.parent / "GROUND" / "SCHEMA"
+        return shipped if (shipped / "nodes.yaml").exists() else own
+
+    def _load_schema(self) -> dict:
+        d = self.schema_dir()
+        self.schema_source = "vault" if d == self.ground / "SCHEMA" else "инструмент (vault свою схему не объявил)"
+        return {name: (self._read_yaml(d / f"{name}.yaml") or {}) for name in self.SCHEMA_FILES}
+
+    def _load_nodes(self):
+        if not self.ground.exists():
+            return
+        for p in sorted(self.ground.rglob("*.md")):
+            if p.name == "_template.md" or "/_index/" in str(p):
+                continue
+            try:
+                text = p.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            m = FM_RE.match(text)
+            if not m:
+                continue
+            try:
+                fm = yaml_parse(m.group(1))
+            except Exception:
+                fm = {"__parse_error__": True}
+            if not isinstance(fm, dict):
+                continue
+            rel = p.relative_to(self.ground)
+            layer = self.LAYERS.get(rel.parts[0], "other") if rel.parts else "other"
+            node = Node(p, self.root, fm, m.group(2), layer)
+            self.nodes.append(node)
+            nid = node.id
+            if nid:
+                if nid in self.by_id:
+                    self.dupes.append((str(nid), self.by_id[nid].rel, node.rel))
+                else:
+                    self.by_id[nid] = node
+
+    # --- схема ---
+
+    def node_types(self, nexus: str | None = None) -> set:
+        base = set((self.schema["nodes"].get("node_types") or {}).keys())
+        for slug, n in self.nexuses.items():
+            if nexus is None or slug == nexus:
+                base |= set(n.get("node_types") or [])
+        return base
+
+    def required_keys(self, node_type: str | None = None, layer: str = "curated") -> list:
+        by_layer = (self.schema["nodes"].get("layer_required") or {}).get(layer)
+        req = list(by_layer if by_layer is not None else (self.schema["nodes"].get("required_keys") or []))
+        spec = (self.schema["nodes"].get("node_types") or {}).get(node_type or "", {}) or {}
+        req += [k for k in (spec.get("also_required") or []) if k not in req]
+        return req
+
+    def edge_fields(self) -> dict:
+        return self.schema["edges"].get("fields") or {}
+
+    def ttl_for(self, node: Node) -> int:
+        """TTL узла: явный ttl_days, иначе профиль по change_rate, иначе по нексусу."""
+        if isinstance(node["ttl_days"], int):
+            return node["ttl_days"]
+        prof = self.schema["profiles"]
+        rates = prof.get("change_rate") or {}
+        cr = node["change_rate"] or (self.nexuses.get(node["nexus"], {}) or {}).get("change_rate")
+        if cr in rates:
+            return int(rates[cr].get("ttl_days", 90))
+        defaults = prof.get("ttl_by_nexus") or {}
+        return int(defaults.get(node["nexus"], defaults.get("_default", 90)))
+
+    def ripeness_of(self, node: Node):
+        upd = as_date(node["updated"])
+        ttl = self.ttl_for(node)
+        if upd is None or not ttl:
+            return None, None
+        p = (TODAY - upd).days / ttl
+        return ("fresh" if p < 0.5 else "ripening" if p < 1.0 else "wilting"), p
+
+    def cp_of(self, node: Node):
+        """Ступень 2..9. Явная cp, иначе выводится из confidence 0..1."""
+        cp = node["cp"]
+        if isinstance(cp, (int, float)):
+            return float(cp)
+        c = node["confidence"]
+        if isinstance(c, (int, float)):
+            return round(float(c) * 9, 1)
+        return None
+
+    def effective_cp(self, node: Node):
+        """CP с учётом распада: увядший узел теряет ступень, а не только ярлык."""
+        cp = self.cp_of(node)
+        if cp is None:
+            return None
+        _, p = self.ripeness_of(node)
+        if p is None:
+            return cp
+        decay = self.schema["profiles"].get("decay") or {}
+        per = float(decay.get("steps_per_ttl", 2.0))
+        lost = max(0.0, (p - 1.0)) * per if p > 1 else 0.0
+        val = max(float(decay.get("floor", 2)), round(cp - lost, 1))
+        if node["disputed"]:
+            cap = ((self.schema["ladder"].get("ceilings") or {}).get("disputed") or 4)
+            val = min(val, float(cap))   # спор не решается в пользу одной стороны
+        return val
+
+    def profiles(self) -> dict:
+        return {p.get("id"): p for p in (self.schema["agents"].get("profiles") or []) if p.get("id")}
+
+    def profile_writes(self, pid: str) -> list:
+        p = self.profiles().get(pid) or {}
+        w = p.get("writes") or []
+        return [w] if isinstance(w, str) else list(w)
+
+    def profile_subs(self, pid: str) -> list:
+        """Подписки профиля: что из чужого для него горячее.
+        Это интерес профиля, а не свойство узла — один и тот же объект
+        для одного PO меняется ежедневно, для другого стабилен."""
+        raw = (self.profiles().get(pid) or {}).get("subscriptions") or []
+        raw = [raw] if isinstance(raw, str) else list(raw)
+        out = []
+        for item in raw:
+            s = str(item)
+            if s.startswith("nexus:"):
+                slug = s.split(":", 1)[1]
+                out += [n for n in self.nodes if n["nexus"] == slug and n.layer == "curated"]
+            elif s in self.by_id:
+                out.append(self.by_id[s])
+        return out
+
+    def in_my_zone(self, pid: str, node: Node) -> bool:
+        return self.scope_of(node) in self.profile_writes(pid) or pid in (node["shared_with"] or [])
+
+    def core_curator(self) -> str:
+        return (self.schema["agents"].get("core") or {}).get("curator") or ""
+
+    def may_write_scope(self, pid: str, node_scope: str, shared_with=None) -> bool:
+        """Зоны пересекаются сознательно: право даёт либо своя зона,
+        либо явное co-ownership узла. Ядро — только через куратора."""
+        if pid in (shared_with or []):
+            return True
+        return node_scope in self.profile_writes(pid)
+
+    def agent_zones(self) -> dict:
+        classes = self.schema["agents"].get("classes") or {}
+        out = {}
+        for a in self.schema["agents"].get("agents") or []:
+            cls = classes.get(a.get("class"), {}) or {}
+            out[a.get("id")] = {
+                "class": a.get("class"),
+                "may_write": a.get("may_write") or cls.get("may_write") or [],
+                "mode": a.get("mode") or cls.get("mode") or "free",
+                "scope": a.get("scope"),
+            }
+        return out
+
+    def scope_of(self, node: Node):
+        return node["scope"] or (self.nexuses.get(node["nexus"], {}) or {}).get("scope") or "org"
+
+
+def as_date(v):
+    if isinstance(v, datetime.date):
+        return v
+    if isinstance(v, str) and _DATE_RE.match(v.strip()):
+        try:
+            return datetime.date.fromisoformat(v.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def active_profile(cx, explicit=None):
+    """Кто сейчас работает: --as, CORTEX_PROFILE или никто (человек)."""
+    pid = explicit or os.environ.get("CORTEX_PROFILE")
+    if not pid:
+        return None
+    if pid not in cx.profiles():
+        die(f"профиль {pid!r} не объявлен в GROUND/SCHEMA/agents.yaml. "
+            f"Есть: {', '.join(cx.profiles()) or '—'}")
+    return pid
+
+
+def find_root(start: pathlib.Path | None = None) -> pathlib.Path:
+    cur = (start or pathlib.Path.cwd()).resolve()
+    for p in [cur, *cur.parents]:
+        if (p / "GROUND").is_dir():
+            return p
+    env = os.environ.get("CORTEX_ROOT")
+    if env and (pathlib.Path(env) / "GROUND").is_dir():
+        return pathlib.Path(env)
+    die("не нашёл vault: нет каталога GROUND ни здесь, ни выше. Укажите CORTEX_ROOT.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# вывод
+# ──────────────────────────────────────────────────────────────────────────────
+
+_TTY = sys.stdout.isatty()
+
+
+def _c(code, s):
+    return f"\033[{code}m{s}\033[0m" if _TTY else s
+
+
+def red(s): return _c(31, s)
+def grn(s): return _c(32, s)
+def ylw(s): return _c(33, s)
+def dim(s): return _c(2, s)
+def bold(s): return _c(1, s)
+
+
+def die(msg, code=2):
+    print(red(f"✗ {msg}"), file=sys.stderr)
+    sys.exit(code)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# гейт: валидация памяти по схеме из GROUND/SCHEMA
+# ──────────────────────────────────────────────────────────────────────────────
+
+class Issue:
+    __slots__ = ("sev", "where", "msg", "hint")
+
+    def __init__(self, sev, where, msg, hint=""):
+        self.sev, self.where, self.msg, self.hint = sev, where, msg, hint
+
+    def line(self):
+        head = red("ERROR") if self.sev == "ERROR" else ylw("WARN ")
+        s = f"{head} {self.where}: {self.msg}"
+        return s + (dim(f"\n        → {self.hint}") if self.hint else "")
+
+
+def _strict(cx, key, default="ERROR"):
+    """Жёсткость проверки: SCHEMA/checks.yaml → checks.<key>: error|warn|off.
+
+    Настройка живёт в схеме, а не в config.yaml: возможность перевести проверку
+    в off — та же власть, что и правка лестницы, и она не должна быть у агента.
+    Старое место (config.yaml → gate:) читается как запасное, чтобы уже
+    настроенные vault не сломались."""
+    # Оба старых места читаются как запасные: SCHEMA/gate.yaml до переименования
+    # в checks.yaml и config.yaml → gate: до переезда настройки в схему.
+    schema_checks = (cx.schema.get("checks") or {}).get("checks") or {}
+    legacy_schema = (cx.schema.get("gate") or {}).get("checks") or {}
+    legacy_cfg = cx.config.get("gate") or {}
+    v = str(schema_checks.get(key) or legacy_schema.get(key)
+            or legacy_cfg.get(key) or default).upper()
+    return {"ERROR": "ERROR", "WARN": "WARN", "OFF": None}.get(v, default)
+
+
+def run_gate(cx: Cortex) -> list[Issue]:
+    out: list[Issue] = []
+    add = out.append
+
+    # --- структура ---
+    if not cx.schema["nodes"]:
+        add(Issue("ERROR", "GROUND/SCHEMA/nodes.yaml", "нет схемы узлов",
+                  "схема обязательна: без неё гейт не знает, что проверять"))
+        return out
+    if not cx.nexuses:
+        add(Issue("ERROR", "GROUND/NEXUS/_registry.yaml", "реестр Нексусов пуст"))
+
+    # реестр против диска: папка с узлами, которой нет в реестре
+    nexus_dir = cx.ground / "NEXUS"
+    if nexus_dir.is_dir():
+        for d in sorted(p for p in nexus_dir.iterdir() if p.is_dir()):
+            if d.name.startswith("_"):
+                continue
+            if d.name not in cx.nexuses and any(d.glob("*.md")):
+                sev = _strict(cx, "registry_drift", "ERROR")
+                if sev:
+                    add(Issue(sev, f"GROUND/NEXUS/{d.name}/", "Нексус не объявлен в _registry.yaml",
+                              "объявите его: cortex nexus add " + d.name))
+
+    # --- зоны агентов против реестра ---
+    # Зона, указывающая на несуществующий Нексус, не сработает никогда:
+    # это остаток чужой конфигурации, а не защита.
+    for aid, z in cx.agent_zones().items():
+        for g in z["may_write"]:
+            m = re.match(r"GROUND/NEXUS/([a-z][a-z0-9-]*)/", str(g))
+            if m and m.group(1) not in cx.nexuses:
+                sev = _strict(cx, "agent_zone_drift", "WARN")
+                if sev:
+                    add(Issue(sev, "GROUND/SCHEMA/agents.yaml",
+                              f"агент {aid!r}: зона {g!r} указывает на Нексус "
+                              f"{m.group(1)!r}, которого нет в реестре",
+                              "объявите Нексус или уберите зону — этот glob не совпадёт никогда"))
+
+    # --- узлы ---
+    known_agents = set(cx.agent_zones())
+    zones = cx.agent_zones()
+    for n in cx.nodes:
+        if n.fm.get("__parse_error__"):
+            add(Issue("ERROR", n.rel, "frontmatter не разбирается"))
+            continue
+        is_index = n.path.stem in ("_index", "_registry")
+        if n.layer not in ("curated", "decisions"):
+            continue  # PULSE и _intake живут в своих форматах, Node schema к ним не применяется
+
+        nt = n["node_type"]
+        for k in cx.required_keys(nt, n.layer):
+            if k not in n.fm:
+                add(Issue("ERROR", n.rel, f"нет обязательного ключа {k!r}"))
+
+        nx = n["nexus"]
+        if nx and nx not in cx.nexuses and n.layer == "curated":
+            add(Issue("ERROR", n.rel, f"nexus {nx!r} нет в реестре"))
+
+        if nt and nt not in cx.node_types():
+            sev = _strict(cx, "unknown_node_type", "ERROR")
+            if sev:
+                add(Issue(sev, n.rel, f"node_type {nt!r} не объявлен",
+                          f"объявите его в _registry.yaml у Нексуса {nx!r}: node_types: [{nt}]"))
+
+        for key, allowed in (cx.schema["nodes"].get("enums") or {}).items():
+            v = n[key]
+            if v is not None and allowed and v not in allowed:
+                add(Issue("ERROR", n.rel, f"{key}={v!r} — допустимо {allowed}"))
+
+        c = n["confidence"]
+        if c is not None and (not isinstance(c, (int, float)) or not 0 <= c <= 1):
+            add(Issue("ERROR", n.rel, f"confidence {c!r} — число 0..1"))
+        cp = n["cp"]
+        if cp is not None and (not isinstance(cp, (int, float)) or not 2 <= cp <= 9):
+            add(Issue("ERROR", n.rel, f"cp {cp!r} — ступень 2..9 по GROUND/SCHEMA/ladder.yaml"))
+
+        st = n["status"]
+        if st and st not in ("draft", "accepted", "rejected"):
+            add(Issue("ERROR", n.rel, f"status {st!r} — draft | accepted | rejected"))
+
+        if not n["sources"]:
+            sev = "WARN" if is_index else "ERROR"
+            add(Issue(sev, n.rel, "пустой sources" + ("" if is_index else " — workslop, узел без источника"),
+                      "" if is_index else "источник или удаление; выдуманный источник хуже отсутствующего"))
+
+        # свежесть: вычисляемое поле не бывает мнением автора
+        rip, _ = cx.ripeness_of(n)
+        if rip and n["ripeness"] and n["ripeness"] != rip:
+            sev = _strict(cx, "ripeness_drift", "WARN")
+            if sev:
+                add(Issue(sev, n.rel, f"ripeness={n['ripeness']!r}, вычисляется {rip!r}",
+                          "cortex refresh — пересчёт по всему vault"))
+
+        # провенанс записи: кто именно это написал
+        cb = n["captured_by"]
+        if cb:
+            if cb not in known_agents and not str(cb).startswith(("human", "po:")):
+                sev = _strict(cx, "unknown_agent", "WARN")
+                if sev:
+                    add(Issue(sev, n.rel, f"captured_by {cb!r} не объявлен в SCHEMA/agents.yaml"))
+            z = zones.get(cb)
+            if z and z["may_write"] and not _allowed(n.rel, z["may_write"]):
+                add(Issue("ERROR", n.rel, f"агент {cb!r} ({z['class']}) не имеет права писать сюда",
+                          f"его зона: {', '.join(z['may_write'])}"))
+            if str(cb).startswith("profile:"):
+                pid = str(cb).split(":", 1)[1]
+                ns = cx.scope_of(n)
+                if pid in cx.profiles() and not cx.may_write_scope(pid, ns, n["shared_with"]):
+                    hint = (f"ядро (scope: org) меняется через PR к куратору"
+                            if ns == "org" else
+                            f"зоны {pid}: {', '.join(cx.profile_writes(pid)) or '—'}. "
+                            f"Нужна совместная работа — добавьте профиль в shared_with узла")
+                    add(Issue("ERROR", n.rel, f"профиль {pid!r} пишет в чужую зону {ns!r}", hint))
+        elif n.layer == "curated" and not is_index:
+            sev = _strict(cx, "missing_provenance", "WARN")
+            if sev:
+                add(Issue(sev, n.rel, "нет captured_by — не видно, кто это записал"))
+
+    # --- рёбра ---
+    for n in cx.nodes:
+        if n.layer not in ("curated", "decisions"):
+            continue
+        for field, spec in cx.edge_fields().items():
+            val = n[field]
+            if val is None:
+                continue
+            targets = val if isinstance(val, list) else [val]
+            for t in targets:
+                if not t or not isinstance(t, str):
+                    continue
+                if (spec or {}).get("external"):
+                    continue
+                pat = (spec or {}).get("external_pattern")
+                if pat and re.match(str(pat), t):
+                    continue        # ключ трекера, а не узел памяти — так объявлено в схеме
+                if t not in cx.by_id:
+                    add(Issue("ERROR", n.rel, f"{field} → {t!r}: висячее ребро",
+                              "сначала узел, потом ссылка — не подменяйте похожим id"))
+
+    for nid, a, b in cx.dupes:
+        add(Issue("ERROR", b, f"дубликат node_id {nid!r} (также {a})", "слейте узлы, оставьте один"))
+
+    return out
+
+
+def _allowed(rel: str, globs: list) -> bool:
+    rel = rel.replace("\\", "/")
+    for g in globs:
+        g = str(g)
+        if fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(rel, g.rstrip("/") + "/*") or rel.startswith(g.rstrip("*/")):
+            return True
+    return False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# поиск: индекс строится на лету, без графовой БД
+# ──────────────────────────────────────────────────────────────────────────────
+
+_WORD = re.compile(r"[\w\-]+", re.UNICODE)
+_STOP = set("и в на с по для из что это как не а но или же бы к у о от до за при над the a of to in and for is are".split())
+
+
+def norm(s: str) -> list[str]:
+    s = unicodedata.normalize("NFKC", str(s)).lower()
+    return [w for w in _WORD.findall(s) if len(w) > 2 and w not in _STOP]
+
+
+def _stem(w: str) -> str:
+    return w[:6] if len(w) > 7 else w
+
+
+class Index:
+    def __init__(self, cx: Cortex, layers=("curated", "decisions", "operational")):
+        self.cx = cx
+        self.docs = [n for n in cx.nodes if n.layer in layers]
+        self.df = Counter()
+        self.tf = []
+        for n in self.docs:
+            toks = norm(n.title) * 3 + norm(" ".join(map(str, n["tags"] or []))) * 2 + norm(n.body)
+            toks = [_stem(t) for t in toks]
+            c = Counter(toks)
+            self.tf.append(c)
+            for t in c:
+                self.df[t] += 1
+        self.N = max(1, len(self.docs))
+
+    def search(self, query: str, top=8, scope=None, nexus=None):
+        q = [_stem(t) for t in norm(query)]
+        if not q:
+            return []
+        scored = []
+        for i, n in enumerate(self.docs):
+            if n["status"] == "rejected":
+                continue
+            if nexus and n["nexus"] != nexus:
+                continue
+            if scope and self.cx.scope_of(n) not in (scope, "org"):
+                continue
+            c = self.tf[i]
+            s = 0.0
+            for t in q:
+                f = c.get(t, 0)
+                if not f:
+                    continue
+                import math
+                s += (1 + math.log(f)) * math.log(self.N / (1 + self.df[t]))
+            if s <= 0:
+                continue
+            ecp = self.cx.effective_cp(n)
+            s *= 1 + 0.06 * (ecp or 4)          # уверенное знание выигрывает у слухов
+            rip, _ = self.cx.ripeness_of(n)
+            if rip == "wilting":
+                s *= 0.6                         # протухшее не молчит, но уступает
+            scored.append((s, n))
+        scored.sort(key=lambda x: -x[0])
+        return scored[:top]
+
+
+def _num(x):
+    """Целое показываем целым: 9, а не 9.0 — число читает человек."""
+    return int(x) if isinstance(x, float) and x.is_integer() else x
+
+
+def anchors(cx: Cortex, n: Node) -> dict:
+    rip, p = cx.ripeness_of(n)
+    return {
+        "node_id": n.id, "title": n.title, "nexus": n["nexus"], "type": n["node_type"],
+        "scope": cx.scope_of(n), "owner": n["owner"], "cp": _num(cx.cp_of(n)),
+        "effective_cp": _num(cx.effective_cp(n)), "ripeness": rip,
+        "age_ratio": round(p, 2) if p is not None else None,
+        "updated": str(n["updated"]), "sources": n["sources"] or [],
+        "captured_by": n["captured_by"], "path": n.rel,
+    }
+
+
+def neighbours(cx: Cortex, n: Node, depth=1) -> list:
+    seen, frontier, out = {n.id}, [n], []
+    fields = cx.edge_fields()
+    back = defaultdict(list)
+    for m in cx.nodes:
+        for f in fields:
+            v = m[f]
+            for t in (v if isinstance(v, list) else [v]):
+                if isinstance(t, str):
+                    back[t].append((f, m))
+    for _ in range(depth):
+        nxt = []
+        for cur in frontier:
+            for f in fields:
+                v = cur[f]
+                for t in (v if isinstance(v, list) else [v]):
+                    if isinstance(t, str) and t in cx.by_id and t not in seen:
+                        seen.add(t)
+                        out.append((f, "→", cx.by_id[t]))
+                        nxt.append(cx.by_id[t])
+            for f, m in back.get(cur.id, []):
+                if m.id and m.id not in seen:
+                    seen.add(m.id)
+                    out.append((f, "←", m))
+                    nxt.append(m)
+        frontier = nxt
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# команды
+# ──────────────────────────────────────────────────────────────────────────────
+
+def cmd_doctor(cx: Cortex, a):
+    print(bold(f"Кортекс {VERSION}") + dim(f"  ({cx.root})"))
+    rows = [
+        ("схема", cx.schema_source, "ok" if cx.schema["nodes"] else "НЕТ"),
+        ("реестр Нексусов", f"{len(cx.nexuses)} шт.", "ok" if cx.nexuses else "пуст"),
+        ("узлов загружено", str(len(cx.nodes)), "ok"),
+        ("типов узлов объявлено", str(len(cx.node_types())), "ok"),
+        ("агентов объявлено", str(len(cx.agent_zones())), "ok" if cx.agent_zones() else "нет"),
+        ("python", sys.version.split()[0], "ok"),
+        ("внешних зависимостей", "нет", "ok"),
+    ]
+    for k, v, st in rows:
+        mark = grn("✓") if st == "ok" else ylw("!")
+        print(f"  {mark} {k:26} {v}")
+    layers = Counter(n.layer for n in cx.nodes)
+    print("\n  слои памяти: " + ", ".join(f"{k}={v}" for k, v in sorted(layers.items())))
+
+    todo = _setup_todo(cx)
+    if todo:
+        print(bold("\n  Кортекс ещё не настроен — с этого начинают:"))
+        for i, (what, how) in enumerate(todo, 1):
+            print(f"    {ylw(str(i) + '.')} {what}")
+            print(dim(f"       {how}"))
+        print(dim("\n  порядок и вопросы для интервью — ONBOARDING.md, раздел «Настройка»"))
+    else:
+        print(grn("\n  ✓ настройка завершена — можно наполнять память"))
+    print(dim("\n  всё считается из markdown при каждом запуске; индекс не хранится"))
+    return 0
+
+
+def _setup_todo(cx: Cortex):
+    """Чего не хватает, чтобы Кортекс стал памятью конкретной организации.
+    Агент проходит этот список с человеком — он не заполняет его сам."""
+    todo = []
+    cfg_text = ""
+    cfg = cx.ground / "config.yaml"
+    if cfg.exists():
+        cfg_text = cfg.read_text(encoding="utf-8")
+    holes, last_key = [], None
+    for line in cfg_text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        kv = _kv_split(line.strip())
+        # Двоеточие внутри плейсхолдера ключом не является.
+        key = kv[0].strip() if kv else None
+        if key and re.fullmatch(r"[A-Za-z_][\w.-]*", key):
+            last_key = key
+        else:
+            key = None
+        if re.search(r"<[^<>]{2,}>", line):
+            name = key or last_key or "?"
+            if name not in holes:
+                holes.append(name)
+    if holes:
+        todo.append((f"в config.yaml не заполнено: {', '.join(holes[:5])}",
+                     "cortex init или правка GROUND/config.yaml руками"))
+
+    profs = cx.profiles()
+    if not profs:
+        todo.append(("не объявлено ни одного профиля PO",
+                     "SCHEMA/agents.yaml → profiles: кто ведёт какую зону"))
+    elif all(str(pid).startswith("po-example") for pid in profs):
+        todo.append(("профили — образцы из шаблона",
+                     "замените po-example-* на свои в SCHEMA/agents.yaml и удалите образцы"))
+
+    cur = cx.core_curator()
+    if not cur or cur.startswith("<"):
+        todo.append(("куратор ядра не назначен",
+                     "SCHEMA/agents.yaml → core.curator; без него увядание ядра ничьё"))
+
+    ladder = (cx.schema["ladder"].get("steps") or {})
+    if ladder and not any((v or {}).get("yours") for v in ladder.values()):
+        todo.append(("лестница доказательств не откалибрована под ваш домен",
+                     "SCHEMA/ladder.yaml → steps[*].yours: чем в вашем контуре "
+                     "подтверждается каждая ступень"))
+
+    gates = (cx.schema["gates"].get("gates") or {})
+    if gates and not any(isinstance((g or {}).get("threshold"), int) for g in gates.values()):
+        todo.append(("гейты не заданы — непонятно, при каком CP даётся обещание наружу",
+                     "SCHEMA/gates.yaml → gates[*].threshold и lead_time_weeks; "
+                     "что считается обещанием наружу, знает руководитель"))
+
+    empty = [s for s in cx.nexuses
+             if not any(n["nexus"] == s and n.path.stem != "_index" for n in cx.nodes)]
+    if len(empty) == len(cx.nexuses):
+        todo.append(("ни один Нексус не наполнен",
+                     "ONBOARDING.md, шаг 2: интервью по одному Нексусу за раз"))
+    elif empty:
+        todo.append((f"не наполнено Нексусов: {len(empty)} из {len(cx.nexuses)}",
+                     "оставшиеся: " + ", ".join(sorted(empty)[:6])))
+
+    spine = [n for n in cx.nodes if n["node_type"] in ("objective", "key-result")]
+    if not spine:
+        todo.append(("нет целей квартала — достижимость не считается",
+                     "ROADMAP/kr-epic-map.md, затем cortex gaps"))
+    return todo
+
+
+def cmd_gate(cx: Cortex, a):
+    issues = run_gate(cx)
+    errs = [i for i in issues if i.sev == "ERROR"]
+    warns = [i for i in issues if i.sev == "WARN"]
+    if a.json:
+        print(json.dumps([{"severity": i.sev, "where": i.where, "message": i.msg, "hint": i.hint}
+                          for i in issues], ensure_ascii=False, indent=2))
+        return 1 if errs else 0
+    limit = None if a.all else 40
+    for i in (errs + warns)[:limit]:
+        print(i.line())
+    hidden = len(issues) - len(issues[:limit]) if limit else 0
+    if hidden > 0:
+        print(dim(f"… ещё {hidden}. Полный список: cortex gate --all"))
+    print()
+    if errs:
+        print(red(f"✗ гейт красный: {len(errs)} ошибок, {len(warns)} предупреждений"))
+        return 1
+    print(grn(f"✓ гейт зелёный: 0 ошибок, {len(warns)} предупреждений"))
+    return 0
+
+
+def cmd_refresh(cx: Cortex, a):
+    """Пересчитать вычисляемые поля. Операция техническая: CP не оценивает, только распад."""
+    changed = 0
+    for n in cx.nodes:
+        if n.layer not in ("curated", "decisions"):
+            continue
+        rip, _ = cx.ripeness_of(n)
+        if not rip:
+            continue
+        updates = {}
+        if n["ripeness"] != rip:
+            updates["ripeness"] = rip
+        ecp = cx.effective_cp(n)
+        cp = cx.cp_of(n)
+        if ecp is not None and n["cp"] is not None:
+            if ecp != cp and n["effective_cp"] != ecp:
+                updates["effective_cp"] = _num(ecp)      # распад или спор сняли ступени
+            elif ecp == cp and n["effective_cp"] is not None:
+                updates["effective_cp"] = None           # поле-дубль убирается
+        if not updates:
+            continue
+        changed += 1
+        if a.dry_run:
+            print(f"  {n.rel}: " + ", ".join(f"{k}={v}" for k, v in updates.items()))
+            continue
+        text = n.path.read_text(encoding="utf-8")
+        for k, v in updates.items():
+            if v is None:
+                text = re.sub(rf"^{k}:.*\n", "", text, count=1, flags=re.M)
+            elif re.search(rf"^{k}:.*$", text, re.M):
+                text = re.sub(rf"^{k}:.*$", f"{k}: {v}", text, count=1, flags=re.M)
+            else:
+                text = text.replace("---\n", f"---\n{k}: {v}\n", 1)
+        n.path.write_text(text, encoding="utf-8")
+    verb = "требуют пересчёта" if a.dry_run else "пересчитано"
+    print(grn(f"✓ {verb}: {changed} узлов") if changed else grn("✓ всё актуально"))
+    if changed and not a.dry_run:
+        print(dim("  коммитьте отдельно: это техническая операция, она не меняет знание"))
+    return 0
+
+
+def cmd_report(cx: Cortex, a):
+    per_nexus = defaultdict(list)
+    for n in cx.nodes:
+        if n.layer == "curated":
+            per_nexus[n["nexus"]].append(n)
+    data = {"nodes": len(cx.nodes), "nexuses": {}, "layers": dict(Counter(n.layer for n in cx.nodes))}
+    rows = []
+    for slug in sorted(cx.nexuses):
+        ns = per_nexus.get(slug, [])
+        meta = cx.nexuses[slug]
+        cps = [cx.effective_cp(n) for n in ns if cx.effective_cp(n) is not None]
+        fresh = sum(1 for n in ns if (cx.ripeness_of(n)[0] == "fresh"))
+        wilt = sum(1 for n in ns if (cx.ripeness_of(n)[0] == "wilting"))
+        ripeness = round((fresh / len(ns)) * (len([n for n in ns if n["sources"]]) / len(ns)), 2) if ns else 0.0
+        rows.append((slug, meta.get("scope") or "org", len(ns),
+                     round(sum(cps) / len(cps), 1) if cps else None, wilt, ripeness))
+        data["nexuses"][slug] = {"scope": meta.get("scope") or "org", "nodes": len(ns),
+                                 "avg_effective_cp": round(sum(cps) / len(cps), 1) if cps else None,
+                                 "wilting": wilt, "ripeness": ripeness}
+    if a.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    print(bold(f"Память: узлов {len(cx.nodes)}, Нексусов {len(cx.nexuses)}"))
+    print(dim(f"  слои: " + ", ".join(f"{k}={v}" for k, v in sorted(data['layers'].items()))))
+    print(f"\n  {'Нексус':22} {'scope':14} {'узлов':>6} {'ср.CP':>6} {'увяд':>5} {'спелость':>9}")
+    for slug, scope, cnt, cp, wilt, rip in rows:
+        bar = grn if rip >= 0.6 else (ylw if rip >= 0.3 else red)
+        print(f"  {slug:22} {str(scope):14} {cnt:6} {str(cp or '—'):>6} {wilt:5} {bar(f'{rip:9.2f}')}")
+    return 0
+
+
+def cmd_ask(cx: Cortex, a):
+    idx = Index(cx)
+    hits = idx.search(" ".join(a.query), top=a.top, scope=a.scope, nexus=a.nexus)
+    if a.json:
+        print(json.dumps({"query": " ".join(a.query),
+                          "answer_from": [anchors(cx, n) for _, n in hits],
+                          "open_questions": _open_questions(cx, [n for _, n in hits])},
+                         ensure_ascii=False, indent=2))
+        return 0
+    if not hits:
+        print(ylw("память не знает об этом — это валидный ответ, а не пустой результат"))
+        print(dim("  зафиксируйте вопрос: cortex node new --type concept ... или положите вход в _intake/"))
+        return 0
+    print(bold(f"Знает: {len(hits)}"))
+    for s, n in hits:
+        ecp, rip = _num(cx.effective_cp(n)), cx.ripeness_of(n)[0]
+        mark = grn("●") if rip == "fresh" else (ylw("●") if rip == "ripening" else
+                                                (red("●") if rip else dim("○")))
+        draft = ylw(" · черновик, не принят") if n["status"] == "draft" else ""
+        print(f"\n  {mark} {bold(n.title)}" + (dim(f"  [{n.id}]") if n.id else dim("  (без node_id)")) + draft)
+        facts = [x for x in (n["nexus"], f"CP {ecp}" if ecp else None, rip,
+                             f"владелец {n['owner']}" if n["owner"] else None) if x]
+        print("     " + dim(" · ".join(map(str, facts)) or n.layer))
+        src = ", ".join(map(str, (n["sources"] or [])[:3]))
+        print(dim(f"     источник: {src}" if src else "     источник не указан — это не факт, а запись"))
+        print(dim(f"     {n.rel}"))
+    oq = _open_questions(cx, [n for _, n in hits])
+    if oq:
+        print(f"\n{bold('Неизвестно:')}")
+        for q in oq[:5]:
+            print(f"  ? {q}")
+    return 0
+
+
+def _open_questions(cx, nodes):
+    out = []
+    for n in nodes:
+        m = re.search(r"##\s*Открытые вопросы\s*\n(.+?)(\n##|\Z)", n.body, re.S)
+        if m:
+            out += [re.sub(r"^[-*]\s*", "", x).strip() for x in m.group(1).strip().split("\n") if x.strip()]
+        if (cx.ripeness_of(n)[0] == "wilting"):
+            out.append(f"узел {n.id} протух — проверить у {n['owner']}")
+    return out
+
+
+def cmd_context(cx: Cortex, a):
+    if a.node:
+        n = cx.by_id.get(a.node)
+        if not n:
+            die(f"нет узла {a.node!r}")
+        payload = {"node": anchors(cx, n), "body": n.body.strip()[:1200],
+                   "neighbours": [{"field": f, "dir": d, **anchors(cx, m)} for f, d, m in neighbours(cx, n, a.depth)]}
+    elif a.kr:
+        kr = cx.by_id.get(a.kr)
+        rel = [n for n in cx.nodes if a.kr in (n["satisfies"] or []) or n["serves"] == a.kr]
+        payload = {"kr": anchors(cx, kr) if kr else {"node_id": a.kr, "known": False},
+                   "supported_by": [anchors(cx, n) for n in rel],
+                   "weakest": min((anchors(cx, n) for n in rel),
+                                  key=lambda x: x["effective_cp"] or 9, default=None)}
+    elif a.scope:
+        rel = [n for n in cx.nodes if cx.scope_of(n) == a.scope and n.layer == "curated"]
+        payload = {"scope": a.scope, "nodes": [anchors(cx, n) for n in rel]}
+    else:
+        die("укажите --node, --kr или --scope")
+    print(json.dumps(payload, ensure_ascii=False, indent=2) if a.json else _pp_context(payload))
+    return 0
+
+
+def _pp_context(p):
+    return json.dumps(p, ensure_ascii=False, indent=2)
+
+
+def cmd_who(cx: Cortex, a):
+    """Кому писать по теме: владельцы узлов, которые память считает релевантными."""
+    idx = Index(cx)
+    hits = idx.search(" ".join(a.topic), top=12)
+    owners = Counter()
+    for s, n in hits:
+        if n["owner"]:
+            owners[str(n["owner"])] += s
+    if a.json:
+        print(json.dumps([{"owner": o, "weight": round(w, 2)} for o, w in owners.most_common(6)],
+                         ensure_ascii=False, indent=2))
+        return 0
+    if not owners:
+        print(ylw("память не знает владельца по этой теме"))
+        return 0
+    print(bold("Кому писать:"))
+    for o, w in owners.most_common(6):
+        nodes = [n.id for _, n in hits if str(n["owner"]) == o][:3]
+        print(f"  {o:28} {dim('по узлам: ' + ', '.join(map(str, nodes)))}")
+    return 0
+
+
+def cmd_stale(cx: Cortex, a):
+    rows = []
+    for n in cx.nodes:
+        if n.layer != "curated":
+            continue
+        rip, p = cx.ripeness_of(n)
+        if rip == "wilting" or (a.soon and rip == "ripening"):
+            rows.append((p or 0, n, rip))
+    rows.sort(key=lambda x: -x[0])
+    if a.json:
+        print(json.dumps([anchors(cx, n) | {"ripeness": rip} for _, n, rip in rows], ensure_ascii=False, indent=2))
+        return 0
+    if not rows:
+        print(grn("✓ протухших узлов нет"))
+        return 0
+    print(bold(f"Очередь верификации: {len(rows)}"))
+    print(dim("  протухший узел верифицируют источником ИЛИ понижают ему CP; продлевать дату нельзя\n"))
+    for p, n, rip in rows[:a.top]:
+        print(f"  {red('●') if rip == 'wilting' else ylw('●')} {n.title[:52]:52} {dim(str(n['owner'])[:18]):18} "
+              f"{dim(f'{p:.1f}×ttl')} {dim(n.rel)}")
+    return 0
+
+
+def cmd_gaps(cx: Cortex, a):
+    """Узлы, не достижимые от хребта целей: технически валидны, ни на что не влияют."""
+    spine = {n.id for n in cx.nodes if n["node_type"] in ("objective", "key-result")}
+    if not spine:
+        print(ylw("хребет целей пуст — достижимость не считается"))
+        print(dim("  заведите цели квартала: ROADMAP/kr-epic-map.md"))
+        return 0
+    reach, frontier = set(spine), list(spine)
+    incoming = defaultdict(set)
+    for n in cx.nodes:
+        for f in cx.edge_fields():
+            v = n[f]
+            for t in (v if isinstance(v, list) else [v]):
+                if isinstance(t, str):
+                    incoming[t].add(n.id)
+    while frontier:
+        cur = frontier.pop()
+        for src in incoming.get(cur, ()):
+            if src and src not in reach:
+                reach.add(src)
+                frontier.append(src)
+    orphans = [n for n in cx.nodes if n.layer == "curated" and n.id and n.id not in reach
+               and n["node_type"] not in ("spine", "operating-model")]
+    print(bold(f"Достижимо от целей: {len(reach)} · сирот: {len(orphans)}"))
+    for n in orphans[:a.top]:
+        print(f"  {dim('○')} {n.title[:56]:56} {dim(n.rel)}")
+    if orphans:
+        print(dim("\n  сирота — не ошибка схемы: это знание, которое ни одной цели не служит"))
+    return 0
+
+
+def cmd_agents(cx: Cortex, a):
+    zones = cx.agent_zones()
+    wrote = Counter(str(n["captured_by"]) for n in cx.nodes if n["captured_by"])
+    print(bold("Агенты и зоны записи"))
+    print(dim("  правило: считает и пишет в курируемую память только детерминированный агент;\n"
+              "  самообучающиеся собирают в _intake/ и не трогают знание напрямую\n"))
+    print(f"  {'агент':28} {'класс':12} {'режим':10} {'узлов':>6}  зона записи")
+    for aid, z in zones.items():
+        print(f"  {str(aid):28} {str(z['class']):12} {str(z['mode']):10} {wrote.get(str(aid), 0):6}  "
+              f"{dim(', '.join(map(str, z['may_write'])))}")
+    unknown = {k: v for k, v in wrote.items() if k not in zones}
+    if unknown:
+        print(ylw("\n  писали, но не объявлены:"))
+        for k, v in unknown.items():
+            print(f"    {k} — {v} узлов")
+    return 0
+
+
+def cmd_intake(cx: Cortex, a):
+    d = cx.ground / "_intake"
+    if a.action == "list":
+        if not d.is_dir():
+            print(ylw("_intake/ ещё нет — создайте каталог поставщика: GROUND/_intake/<источник>/"))
+            return 0
+        total = 0
+        for sub in sorted(p for p in d.iterdir() if p.is_dir()):
+            files = sorted(sub.rglob("*.md"))
+            total += len(files)
+            print(f"  {bold(sub.name):24} {len(files):4} записей  {dim(str(sub.relative_to(cx.root)))}")
+        loose = [p for p in d.glob("*.md")]
+        if loose:
+            print(f"  {bold('(корень)'):24} {len(loose):4} записей")
+            total += len(loose)
+        print(dim(f"\n  всего {total}. Разбор: cortex intake route <файл> — предложит узлы, запись только через node new"))
+        return 0
+    if a.action == "route":
+        p = pathlib.Path(a.path)
+        if not p.exists():
+            die(f"нет файла {p}")
+        text = p.read_text(encoding="utf-8")
+        idx = Index(cx)
+        hits = idx.search(text[:2000], top=5)
+        print(bold(f"Вход: {p.name}"))
+        print(dim("  куда это ложится по текущей памяти (предложение, не запись):\n"))
+        for s, n in hits:
+            print(f"  → {n['nexus']:16} {n.title[:44]:44} {dim(n.id)}")
+        print(dim("\n  решение о записи принимает человек; агент показывает, не пишет"))
+        return 0
+    return 0
+
+
+NEW_TEMPLATE = """---
+{fm}
+---
+
+# {title}
+
+{body}
+
+## Открытые вопросы
+
+- 
+"""
+
+
+def cmd_node(cx: Cortex, a):
+    a.id = a.id or getattr(a, "target", None)
+    if a.action == "check":
+        n = cx.by_id.get(a.id)
+        if not n:
+            die(f"нет узла {a.id!r}")
+        bad = [i for i in run_gate(cx) if i.where == n.rel]
+        print(json.dumps(anchors(cx, n), ensure_ascii=False, indent=2))
+        for i in bad:
+            print(i.line())
+        return 1 if any(i.sev == "ERROR" for i in bad) else 0
+
+    if a.action == "new":
+        if a.nexus not in cx.nexuses:
+            die(f"Нексус {a.nexus!r} не объявлен в реестре. Доступны: {', '.join(sorted(cx.nexuses))}")
+        types = cx.node_types(a.nexus)
+        if a.type not in types and _strict(cx, "unknown_node_type", "ERROR") == "ERROR":
+            die(f"тип {a.type!r} не объявлен. Объявите в _registry.yaml у {a.nexus!r} или выберите из: "
+                f"{', '.join(sorted(types))}")
+        if not a.source:
+            die("нужен --source: узел без источника не создаётся (это правило, а не формальность)")
+        nid = a.id or slugify(a.title)
+        if nid in cx.by_id:
+            die(f"узел {nid!r} уже есть: {cx.by_id[nid].rel}. Обновите его, а не заводите второй.")
+        dup = _near_duplicate(cx, a.title, a.nexus)
+        if dup and not a.force:
+            die(f"похоже на дубликат: {dup.id} — {dup.title} ({dup.rel}). "
+                f"Обновите существующий или повторите с --force")
+        ttl = a.ttl or (cx.schema["profiles"].get("change_rate") or {}).get(a.change_rate, {}).get("ttl_days", 90)
+        pid = active_profile(cx, a.as_profile)
+        # Зона по умолчанию: своя у профиля, иначе объявленная у Нексуса.
+        default_scope = (cx.profile_writes(pid) or [None])[0] if pid else None
+        scope = a.scope or default_scope or (cx.nexuses[a.nexus].get("scope") or "org")
+        by = a.by if a.by != "human" or not pid else f"profile:{pid}"
+        if pid and not cx.may_write_scope(pid, scope, a.shared_with):
+            die(f"профиль {pid!r} не пишет в зону {scope!r}. Его зоны: "
+                f"{', '.join(cx.profile_writes(pid)) or '—'}. "
+                + ("Ядро меняется через PR к куратору." if scope == "org"
+                   else "Для совместной работы добавьте --shared-with " + pid))
+        # Запись агента — черновик, пока человек её не принял.
+        status = a.status or ("draft" if by != "human" else None)
+        fm = {
+            "nexus": a.nexus, "node_id": nid, "node_type": a.type, "title": a.title,
+            "kind": a.kind, "scope": scope,
+            "owner": a.owner or "Product Engineer",
+            "cp": int(a.cp) if float(a.cp).is_integer() else a.cp,
+            "confidence": round(a.cp / 9, 2),
+            "change_rate": a.change_rate,
+            "sources": list(a.source), "captured_by": by,
+            "updated": str(TODAY), "ttl_days": ttl, "ripeness": "fresh",
+        }
+        if status:
+            fm["status"] = status
+        if a.shared_with:
+            fm["shared_with"] = list(a.shared_with)
+        if a.aliases:
+            fm["aliases"] = list(a.aliases)
+        for field, vals in (("satisfies", a.satisfies), ("depends_on", a.depends_on),
+                            ("based_on", a.based_on)):
+            if vals:
+                fm[field] = list(vals)
+        if a.serves:
+            fm["serves"] = a.serves
+        for f in (list(a.satisfies or []) + list(a.depends_on or []) + list(a.based_on or [])
+                  + ([a.serves] if a.serves else [])):
+            if f not in cx.by_id:
+                die(f"ребро → {f!r}: такого узла нет. Сначала узел, потом ссылка.")
+        target = cx.ground / "NEXUS" / a.nexus / f"{nid}.md"
+        content = NEW_TEMPLATE.format(fm=yaml_dump(fm), title=a.title, body=a.body or "")
+        if a.dry_run:
+            print(dim(f"— сухой прогон, файл не создан: {target.relative_to(cx.root)}\n"))
+            print(content)
+            return 0
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        print(grn(f"✓ узел создан: {target.relative_to(cx.root)}"))
+        print(dim("  проверьте: cortex gate"))
+        return 0
+
+    if a.action == "set":
+        n = cx.by_id.get(a.id)
+        if not n:
+            die(f"нет узла {a.id!r}")
+        text = n.path.read_text(encoding="utf-8")
+        cp_up = a.cp is not None and (cx.cp_of(n) or 0) < a.cp
+        if cp_up and not a.source:
+            die("повышение CP требует нового источника (--source). Без него ступень не растёт.")
+        changes = {}
+        if a.cp is not None:
+            changes["cp"] = int(a.cp) if float(a.cp).is_integer() else a.cp
+            changes["confidence"] = round(a.cp / 9, 2)
+        if a.owner:
+            changes["owner"] = a.owner
+        changes["updated"] = str(TODAY)
+        for k, v in changes.items():
+            if re.search(rf"^{k}:.*$", text, re.M):
+                text = re.sub(rf"^{k}:.*$", f"{k}: {v}", text, count=1, flags=re.M)
+            else:
+                text = text.replace("---\n", f"---\n{k}: {v}\n", 1)
+        if a.source:
+            cur = n["sources"] or []
+            merged = cur + [s for s in a.source if s not in cur]
+            text = re.sub(r"^sources:.*$", "sources: [" + ", ".join(_q(s) for s in merged) + "]",
+                          text, count=1, flags=re.M)
+        if a.dry_run:
+            print(text.split("---")[1])
+            return 0
+        n.path.write_text(text, encoding="utf-8")
+        print(grn(f"✓ обновлён {n.rel}"))
+        return 0
+    return 0
+
+
+def _near_duplicate(cx: Cortex, title: str, nexus: str):
+    t = set(norm(title))
+    if not t:
+        return None
+    for n in cx.nodes:
+        if n["nexus"] != nexus:
+            continue
+        o = set(norm(n.title))
+        if o and len(t & o) / len(t | o) > 0.6:
+            return n
+    return None
+
+
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def slugify(s: str) -> str:
+    """node_id читает человек и он стабилен навсегда — транслитерация должна
+    давать узнаваемое имя, а не шифр."""
+    out = "".join(_TRANSLIT.get(ch, ch) for ch in str(s).lower())
+    out = re.sub(r"[^a-z0-9]+", "-", out).strip("-")
+    return out[:48].rstrip("-") or "node"
+
+
+def cmd_nexus(cx: Cortex, a):
+    if a.action == "add":
+        p = cx.ground / "NEXUS" / "_registry.yaml"
+        if a.slug in cx.nexuses:
+            die(f"Нексус {a.slug!r} уже в реестре")
+        line = (f"  - {{slug: {a.slug}, source: custom, name: {_q(a.name or a.slug)}, "
+                f"scope: {a.scope}, owner: {_q(a.owner or 'Product Ops')}, "
+                f"node_types: [{', '.join(a.types or ['entity'])}], "
+                f"purpose: {_q(a.purpose or '')}, onboarded: todo}}\n")
+        p.write_text(p.read_text(encoding="utf-8").rstrip("\n") + "\n" + line, encoding="utf-8")
+        (cx.ground / "NEXUS" / a.slug).mkdir(parents=True, exist_ok=True)
+        print(grn(f"✓ Нексус {a.slug} объявлен"))
+        return 0
+    for slug, n in sorted(cx.nexuses.items()):
+        print(f"  {slug:22} {str(n.get('scope') or 'org'):14} {dim(str(n.get('purpose') or '')[:60])}")
+    return 0
+
+
+def _set_status(node: Node, value: str):
+    text = node.path.read_text(encoding="utf-8")
+    if re.search(r"^status:.*$", text, re.M):
+        text = re.sub(r"^status:.*$", f"status: {value}", text, count=1, flags=re.M)
+    else:
+        text = text.replace("---\n", f"---\nstatus: {value}\n", 1)
+    node.path.write_text(text, encoding="utf-8")
+
+
+def cmd_review(cx: Cortex, a):
+    """Очередь приёмки: что агенты собрали и ждёт подтверждения человека."""
+    drafts = [n for n in cx.nodes if n["status"] == "draft"]
+    if a.nexus:
+        drafts = [n for n in drafts if n["nexus"] == a.nexus]
+
+    if a.accept or a.reject:
+        targets, value = (a.accept, "accepted") if a.accept else (a.reject, "rejected")
+        done = []
+        for nid in targets:
+            n = cx.by_id.get(nid)
+            if not n:
+                print(red(f"  нет узла {nid}"))
+                continue
+            _set_status(n, value)
+            done.append(nid)
+        print(grn(f"✓ {value}: {len(done)}") + dim(f"  {', '.join(done)}" if done else ""))
+        return 0
+
+    if a.accept_all:
+        if not a.nexus:
+            die("--accept-all только вместе с --nexus: пачкой принимают однородное, "
+                "а факты о людях смотрят поштучно")
+        for n in drafts:
+            _set_status(n, "accepted")
+        print(grn(f"✓ принято пачкой: {len(drafts)} узлов Нексуса {a.nexus}"))
+        return 0
+
+    if not drafts:
+        print(grn("✓ очередь приёмки пуста"))
+        return 0
+    if a.json:
+        print(json.dumps([anchors(cx, n) | {"body": n.body.strip()[:400]} for n in drafts],
+                         ensure_ascii=False, indent=2))
+        return 0
+
+    by_nexus = defaultdict(list)
+    for n in drafts:
+        by_nexus[n["nexus"]].append(n)
+    print(bold(f"Ждёт приёмки: {len(drafts)}"))
+    print(dim("  черновик не участвует в ответах как факт, пока вы его не приняли\n"))
+    for nx, ns in sorted(by_nexus.items()):
+        batch = nx not in ("team",)
+        print(f"  {bold(str(nx))}  {len(ns)} шт." +
+              dim("  — можно пачкой" if batch else "  — смотрите поштучно: это люди"))
+        for n in ns[:a.top]:
+            src = ", ".join(map(str, (n["sources"] or [])[:2]))
+            print(f"    · {str(n.title)[:48]:48} {dim('CP ' + str(_num(cx.cp_of(n))))} "
+                  f"{dim(str(n['captured_by']))}")
+            print(dim(f"      {src}"))
+        if len(ns) > a.top:
+            print(dim(f"    … ещё {len(ns) - a.top}"))
+    print(dim("\n  принять пачкой:  cortex review --nexus <slug> --accept-all"))
+    print(dim("  принять точечно: cortex review --accept <node_id> [--accept <node_id>]"))
+    print(dim("  отклонить:       cortex review --reject <node_id>"))
+    return 0
+
+
+def cmd_resolve(cx: Cortex, a):
+    """Кто или что имеется в виду: упоминание в реплике → узел памяти."""
+    q = " ".join(a.mention)
+    qt = set(norm(q))
+    cands = []
+    for n in cx.nodes:
+        if n.layer not in ("curated", "decisions") or not n.id:
+            continue
+        names = [str(n.title), str(n.id)] + [str(x) for x in (n["aliases"] or [])]
+        if n["full_name"]:
+            names.append(str(n["full_name"]))
+        best = 0.0
+        for name in names:
+            nt = set(norm(name))
+            if not nt:
+                continue
+            if q.strip().lower() == name.strip().lower():
+                best = 1.0
+                break
+            inter = len(qt & nt)
+            if inter:
+                best = max(best, inter / max(1, len(qt | nt)) + (0.3 if qt <= nt else 0))
+        if best > 0.25:
+            cands.append((best, n))
+    cands.sort(key=lambda x: -x[0])
+    cands = cands[:a.top]
+    if a.json:
+        print(json.dumps([anchors(cx, n) | {"match": round(s, 2)} for s, n in cands],
+                         ensure_ascii=False, indent=2))
+        return 0
+    if not cands:
+        print(ylw(f"память не знает, кто или что такое «{q}»"))
+        print(dim("  это валидный ответ: спросите человека и запишите узел, а не догадывайтесь"))
+        return 0
+    print(bold(f"«{q}» — это:"))
+    for s, n in cands:
+        st = n["status"]
+        mark = dim(" (черновик)") if st == "draft" else ""
+        print(f"\n  {bold(str(n.title))}{mark}  {dim('[' + str(n.id) + ']')}")
+        facts = [x for x in (n["node_type"], n["nexus"], cx.scope_of(n),
+                             f"владелец {n['owner']}" if n["owner"] else None) if x]
+        print("     " + dim(" · ".join(map(str, facts))))
+        if n["role_title"] or n["department"]:
+            print(dim(f"     {n['role_title'] or ''} {n['department'] or ''}".rstrip()))
+    return 0
+
+
+DEP_FIELDS = ("depends_on", "based_on", "satisfies", "serves", "realizes", "addresses")
+
+
+def _seams(cx: Cortex, pid: str):
+    """Рёбра, пересекающие границу зоны. Наружу — моя работа упирается в чужое;
+    внутрь — на мою работу рассчитывают."""
+    out, inn = [], []
+    for n in cx.nodes:
+        if n.layer not in ("curated", "decisions") or not n.id:
+            continue
+        mine = cx.in_my_zone(pid, n)
+        for f in DEP_FIELDS:
+            v = n[f]
+            for tid in (v if isinstance(v, list) else [v]):
+                if not isinstance(tid, str) or tid not in cx.by_id:
+                    continue
+                tgt = cx.by_id[tid]
+                tmine = cx.in_my_zone(pid, tgt)
+                if mine and not tmine:
+                    out.append((n, f, tgt))
+                elif tmine and not mine:
+                    inn.append((n, f, tgt))
+    return out, inn
+
+
+def cmd_seams(cx: Cortex, a):
+    pid = active_profile(cx, a.as_profile)
+    if not pid:
+        die("укажите профиль: --as <профиль> или CORTEX_PROFILE")
+    out, inn = _seams(cx, pid)
+    key = lambda row: (cx.effective_cp(row[2]) or 9)
+    out.sort(key=key)
+
+    if a.json:
+        print(json.dumps({
+            "profile": pid,
+            "outgoing": [{"my_node": anchors(cx, n), "field": f, "depends_on": anchors(cx, t_)}
+                         for n, f, t_ in out],
+            "incoming": [{"their_node": anchors(cx, n), "field": f, "my_node": anchors(cx, t_)}
+                         for n, f, t_ in inn],
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    print(bold(f"Стыки профиля {pid}"))
+    print(dim("  зоны пересекаются: это не аномалия, а место, где нужна координация\n"))
+    if out:
+        print(bold("  Наружу — моё упирается в чужое:"))
+        print(dim("  слабейшая ступень на чужой стороне и есть потолок вашего обещания\n"))
+        for n, f, tgt in out[:a.top]:
+            ecp = _num(cx.effective_cp(tgt))
+            rip = cx.ripeness_of(tgt)[0]
+            mark = red("●") if (ecp or 9) <= 3 else (ylw("●") if (ecp or 9) <= 5 else grn("●"))
+            print(f"  {mark} {str(n.title)[:34]:34} {dim('—' + f + '→')} {str(tgt.title)[:30]:30}")
+            print(dim(f"       чужая зона {cx.scope_of(tgt)} · владелец {tgt['owner']} · "
+                      f"CP {ecp} · {rip}"))
+    else:
+        print(dim("  наружу: нет — ваша работа ни на что чужое не опирается"))
+    print()
+    if inn:
+        print(bold("  Внутрь — на моё рассчитывают:"))
+        for n, f, tgt in inn[:a.top]:
+            print(f"  {dim('○')} {str(n.title)[:34]:34} {dim('—' + f + '→')} {str(tgt.title)[:30]:30}")
+            print(dim(f"       из зоны {cx.scope_of(n)} · владелец {n['owner']}"))
+        print(dim("\n  понижение CP здесь бьёт по чужому кварталу — предупреждайте владельца"))
+    else:
+        print(dim("  внутрь: нет — на вашу зону пока никто не ссылается"))
+    return 0
+
+
+def _first_para(body: str, limit=180) -> str:
+    for block in body.split("\n\n"):
+        s = " ".join(block.split())
+        if s and not s.startswith(("#", "|", ">", "-")):
+            return s[:limit] + ("…" if len(s) > limit else "")
+    return ""
+
+
+def _pack_node(cx: Cortex, n: Node, body=True) -> str:
+    ecp = _num(cx.effective_cp(n))
+    rip = cx.ripeness_of(n)[0]
+    bits = [x for x in (n["node_type"], f"CP {ecp}" if ecp else None, rip,
+                        f"владелец {n['owner']}" if n["owner"] else None) if x]
+    head = f"- **{n.title}** `{n.id}`"
+    if n["status"] == "draft":
+        head += " ⚠️ черновик, не принят"
+    lines = [head, f"  {' · '.join(map(str, bits))}"]
+    if n["aliases"]:
+        lines.append(f"  зовут также: {', '.join(map(str, n['aliases']))}")
+    if body:
+        para = _first_para(n.body)
+        if para:
+            lines.append(f"  {para}")
+    src = ", ".join(map(str, (n["sources"] or [])[:2]))
+    lines.append(f"  источник: {src or '—'}")
+    return "\n".join(lines)
+
+
+def cmd_pack(cx: Cortex, a):
+    """Срез памяти под профиль: своя зона + стыки + подписки + ядро.
+
+    Профиль не обязан иметь шелл и не вместит пятьсот узлов — он получает
+    собранный пакет, который пересобирает детерминированный прогон."""
+    if getattr(a, "all", False):
+        rc = 0
+        for one in cx.profiles():
+            a.as_profile, a.all = one, False
+            rc |= cmd_pack(cx, a)
+        return rc
+    pid = active_profile(cx, a.as_profile)
+    if not pid:
+        die("укажите профиль: --as <профиль>, CORTEX_PROFILE или --all")
+    prof = cx.profiles()[pid]
+    zones = cx.profile_writes(pid)
+
+    curated = [n for n in cx.nodes if n.layer in ("curated", "decisions") and n.id
+               and n["status"] != "rejected"]
+    mine = sorted([n for n in curated if cx.in_my_zone(pid, n)],
+                  key=lambda n: (str(n["nexus"] or ""), str(n.id)))
+    subs = [n for n in cx.profile_subs(pid) if not cx.in_my_zone(pid, n)]
+    out_seams, in_seams = _seams(cx, pid)
+    core = sorted([n for n in curated if cx.scope_of(n) == "org" and n not in subs],
+                  key=lambda n: (-(cx.effective_cp(n) or 0), n.id))
+    people = [n for n in core if n["node_type"] == "person"]
+    rules = [n for n in core if n["nexus"] == "ops-model"]
+    rest_core = [n for n in core if n not in people and n not in rules]
+    stale = [n for n in mine + subs if cx.ripeness_of(n)[0] == "wilting"]
+    questions = _open_questions(cx, mine)
+
+    if a.json:
+        print(json.dumps({
+            "profile": pid, "zones": zones, "built": str(TODAY),
+            "my_zone": [anchors(cx, n) for n in mine],
+            "subscriptions": [anchors(cx, n) for n in subs],
+            "outgoing_seams": [{"mine": anchors(cx, n), "field": f, "theirs": anchors(cx, t_)}
+                               for n, f, t_ in out_seams],
+            "core": [anchors(cx, n) for n in (people + rules + rest_core)[:a.core_limit]],
+            "stale": [anchors(cx, n) for n in stale],
+            "open_questions": questions,
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    L = []
+    w = L.append
+    w(f"# Срез памяти: {prof.get('name') or pid}")
+    w("")
+    # Дату сборки в тело не пишем: она сделала бы срез разным при одинаковой
+    # памяти, и проверка «срез не отстал» краснела бы на следующий день после
+    # коммита, ничего не сказав о содержимом. Когда собрали — знает git.
+    w(f"Собран командой `cortex pack --as {pid}`. Это **производный артефакт**: "
+      f"истина — в репозитории, срез пересобирается и не правится руками.")
+    w("")
+    w(f"- **Ваш профиль:** `{pid}`" + (f" · {prof.get('person')}" if prof.get("person") else ""))
+    w(f"- **Ваши зоны записи:** {', '.join(zones) or '—'}")
+    w(f"- **В зоне узлов:** {len(mine)} · подписок: {len(subs)} · "
+      f"стыков наружу: {len(out_seams)} · протухло: {len(stale)}")
+    w("")
+    w("## Как этим пользоваться")
+    w("")
+    w("Это то, что память знает на момент сборки. Правила, которые не обсуждаются:")
+    w("")
+    w("- **Уверенность (CP) — ступень 2–9 по силе артефакта, а не мнение.** Устное и чат "
+      "не выше третьей, пересказ чужих слов не выше второй.")
+    w("- **Узел, помеченный черновиком, фактом не считается** — его ещё не принял человек.")
+    w("- **Протухший узел** (`wilting`) верифицируют источником или понижают ему CP; "
+      "ссылаться на него как на свежий факт нельзя.")
+    w("- **Отвечая, называйте, на чём держится ответ** — ступень и источник, — "
+      "**что неизвестно** и **какой артефакт изменил бы ответ**.")
+    w("- «Память не знает» — валидный ответ. Догадка вместо факта отравляет память.")
+    w("")
+
+    def section(title, nodes, note="", body=True, limit=None):
+        if not nodes:
+            return
+        w(f"## {title}")
+        w("")
+        if note:
+            w(f"_{note}_")
+            w("")
+        shown = nodes[:limit] if limit else nodes
+        for n in shown:
+            w(_pack_node(cx, n, body=body))
+            w("")
+        if limit and len(nodes) > limit:
+            w(f"_…ещё {len(nodes) - limit}. Полностью — `cortex ask` по теме._")
+            w("")
+
+    by_nexus = defaultdict(list)
+    for n in mine:
+        # У слоя решений нет Нексуса: ставка и артефакт ему не принадлежат.
+        by_nexus[n["nexus"] or "решения"].append(n)
+    if mine:
+        w("## Ваша зона")
+        w("")
+        for nx, ns in sorted(by_nexus.items(), key=lambda kv: str(kv[0])):
+            w(f"### {nx}")
+            w("")
+            for n in ns:
+                w(_pack_node(cx, n))
+                w("")
+
+    if out_seams:
+        w("## Стыки: ваша работа упирается в чужое")
+        w("")
+        w("_Слабейшая ступень на чужой стороне — потолок вашего обещания. "
+          "Координация здесь обязательна, и она не решается записью в чужую зону._")
+        w("")
+        for n, f, tgt in sorted(out_seams, key=lambda r: (cx.effective_cp(r[2]) or 9))[:a.seam_limit]:
+            w(f"- **{n.title}** —{f}→ **{tgt.title}** `{tgt.id}`")
+            w(f"  чужая зона {cx.scope_of(tgt)} · владелец {tgt['owner']} · "
+              f"CP {_num(cx.effective_cp(tgt))} · {cx.ripeness_of(tgt)[0]}")
+            w("")
+
+    section("Подписки", subs,
+            "То, что вы объявили для себя горячим: чужое, но нужное часто.")
+    section("Кто есть кто", people,
+            "Ядро организации. Меняется через куратора — вы это читаете, но не правите.",
+            body=False, limit=a.core_limit)
+    section("Правила игры", rules,
+            "Операционная модель: как принимаются решения в этой организации.")
+    section("Ядро: остальное", rest_core, body=False, limit=a.core_limit)
+
+    if stale:
+        w("## Протухло — проверить или понизить уверенность")
+        w("")
+        for n in stale:
+            w(f"- **{n.title}** `{n.id}` · владелец {n['owner']} · "
+              f"обновлено {n['updated']}")
+        w("")
+    if questions:
+        w("## Открытые вопросы")
+        w("")
+        for q in questions[:20]:
+            w(f"- {q}")
+        w("")
+    w("---")
+    w("")
+    w(f"_Сомневаетесь — спросите память: `cortex ask \"<тема>\" --as {pid}`, "
+      f"`cortex resolve \"<как назвали>\"`, `cortex seams --as {pid}`._")
+
+    text = "\n".join(L)
+    if a.stdout:
+        print(text)
+        return 0
+    target = pathlib.Path(a.out) if a.out else (cx.ground / "_index" / "packs" / f"{pid}.md")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    print(grn(f"✓ срез собран: {target.relative_to(cx.root)}") +
+          dim(f"  {len(text)} символов, узлов {len(mine) + len(subs) + min(len(core), a.core_limit)}"))
+    if len(text) > a.budget:
+        print(ylw(f"  срез больше бюджета {a.budget}: сузьте подписки или "
+                  f"уменьшите --core-limit"))
+    return 0
+
+
+def _intake_age(cx: Cortex):
+    """Сколько лежит неразобранное. Очередь без ритма превращается в свалку."""
+    d = cx.ground / "_intake"
+    if not d.is_dir():
+        return 0, None
+    files = [f for f in d.rglob("*.md") if f.name not in ("README.md", "inbox.md")]
+    inbox = d / "inbox.md"
+    if inbox.exists() and len([x for x in inbox.read_text(encoding="utf-8").splitlines()
+                               if x.strip() and not x.startswith(("#", "-", ">"))]) > 3:
+        files.append(inbox)
+    if not files:
+        return 0, None
+    oldest = min(files, key=lambda f: f.stat().st_mtime)
+    age = (datetime.datetime.now() - datetime.datetime.fromtimestamp(oldest.stat().st_mtime)).days
+    return len(files), age
+
+
+def _same_object(a_node: Node, b_node: Node) -> float:
+    """Похоже ли, что это два описания одного объекта. Детерминированно:
+    пересечение псевдонимов или совпадение заголовков."""
+    def names(n):
+        return {str(x).lower().strip() for x in (n["aliases"] or [])} | {str(n.title).lower().strip()}
+
+    al_a, al_b = names(a_node), names(b_node)
+    if al_a & al_b:
+        return 1.0
+    ta, tb = set(norm(a_node.title)), set(norm(b_node.title))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _conflicts(cx: Cortex, threshold=0.6):
+    nodes = [n for n in cx.nodes if n.layer in ("curated", "decisions") and n.id]
+    out = []
+    for i, x in enumerate(nodes):
+        for y in nodes[i + 1:]:
+            # спор возможен только между разными зонами или разными авторами:
+            # два узла одного автора в одной зоне — это дубликат, а не расхождение
+            if cx.scope_of(x) == cx.scope_of(y) and x["captured_by"] == y["captured_by"]:
+                continue
+            sim = _same_object(x, y)
+            if sim < threshold:
+                continue
+            marks = []
+            if x["owner"] and y["owner"] and str(x["owner"]) != str(y["owner"]):
+                marks.append("разные владельцы")
+            cx_, cy = cx.cp_of(x), cx.cp_of(y)
+            if cx_ and cy and abs(cx_ - cy) >= 3:
+                marks.append(f"уверенность расходится на {abs(cx_ - cy):.0f} ступени")
+            rx, ry = cx.ripeness_of(x)[0], cx.ripeness_of(y)[0]
+            if {rx, ry} == {"fresh", "wilting"}:
+                marks.append("одна сторона протухла")
+            if marks or sim >= 0.95:
+                out.append((round(sim, 2), x, y, marks or ["два описания одного объекта"]))
+    out.sort(key=lambda r: -r[0])
+    return out
+
+
+def _add_field(node: Node, key: str, value):
+    text = node.path.read_text(encoding="utf-8")
+    if re.search(rf"^{key}:.*$", text, re.M):
+        text = re.sub(rf"^{key}:.*$", f"{key}: {value}", text, count=1, flags=re.M)
+    else:
+        text = text.replace("---\n", f"---\n{key}: {value}\n", 1)
+    node.path.write_text(text, encoding="utf-8")
+
+
+def cmd_conflicts(cx: Cortex, a):
+    """Расхождения между зонами. Система не выбирает правильную сторону:
+    расхождение и есть неопределённость, и оно опускает уверенность обеим."""
+    if a.resolve:
+        n = cx.by_id.get(a.resolve)
+        if not n:
+            die(f"нет узла {a.resolve!r}")
+        if not a.source:
+            die("снятие спора требует нового источника (--source): спор не закрывается "
+                "рассуждением, иначе он закрывается в пользу того, кто настойчивее")
+        _add_field(n, "disputed", "false")
+        cur = n["sources"] or []
+        text = n.path.read_text(encoding="utf-8")
+        merged = cur + [s for s in a.source if s not in cur]
+        text = re.sub(r"^sources:.*$", "sources: [" + ", ".join(_q(s) for s in merged) + "]",
+                      text, count=1, flags=re.M)
+        n.path.write_text(text, encoding="utf-8")
+        print(grn(f"✓ спор снят по {a.resolve}") + dim(" — вторая сторона остаётся спорной, "
+                                                       "пока её тоже не подтвердят"))
+        return 0
+
+    pairs = _conflicts(cx)
+    if a.as_profile:
+        pid = active_profile(cx, a.as_profile)
+        pairs = [r for r in pairs if cx.in_my_zone(pid, r[1]) or cx.in_my_zone(pid, r[2])]
+
+    if a.json:
+        print(json.dumps([{"similarity": s, "why": why,
+                           "a": anchors(cx, x), "b": anchors(cx, y)}
+                          for s, x, y, why in pairs], ensure_ascii=False, indent=2))
+        return 0
+
+    if not pairs:
+        print(grn("✓ расхождений между зонами не найдено"))
+        return 0
+
+    print(bold(f"Расхождения: {len(pairs)}"))
+    print(dim("  система не выбирает правильную сторону — она показывает обе.\n"
+              "  Расхождение и есть неопределённость, поэтому спор опускает уверенность\n"))
+    for s, x, y, why in pairs[:a.top]:
+        print(f"  {red('●')} {', '.join(why)}  {dim(f'сходство {s}')}")
+        for n in (x, y):
+            src = ", ".join(map(str, (n["sources"] or [])[:2]))
+            print(f"      {str(n.title)[:40]:40} {dim(f'[{n.id}]')}")
+            print(dim(f"        зона {cx.scope_of(n)} · владелец {n['owner']} · "
+                      f"CP {_num(cx.effective_cp(n))} · {n['captured_by']}"))
+            print(dim(f"        источник: {src or '—'}"))
+        print()
+
+    if a.mark:
+        marked = 0
+        for s, x, y, why in pairs:
+            for one, other in ((x, y), (y, x)):
+                cur = one["contradicts"] or []
+                if other.id not in cur:
+                    _add_field(one, "contradicts", "[" + ", ".join(cur + [other.id]) + "]")
+                _add_field(one, "disputed", "true")
+                marked += 1
+        print(grn(f"✓ помечено спорными: {marked} узлов"))
+        print(dim("  уверенность обеих сторон ограничена потолком спора из ladder.yaml.\n"
+                  "  Снять: cortex conflicts --resolve <node_id> --source <новый артефакт>"))
+    else:
+        print(dim("  пометить спорными: cortex conflicts --mark"))
+    return 0
+
+
+def _git_history(cx: Cortex, skip_re=None) -> dict:
+    """Когда каждый файл менялся по существу. Один проход по истории.
+
+    Технические коммиты (пересчёт свежести) отбрасываются: они трогают сотни
+    файлов сразу и превратили бы калибровку в замер собственной активности."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(cx.root), "log", "--name-only", "--format=%x00%cI%x00%s",
+             "--", "GROUND"], capture_output=True, text=True, timeout=60)
+    except Exception:
+        return {}
+    if out.returncode != 0:
+        return {}
+    hist, when, skip = defaultdict(list), None, False
+    for line in out.stdout.split("\n"):
+        if line.startswith("\x00"):
+            parts = line[1:].split("\x00")
+            when = parts[0].strip()[:10]
+            subject = parts[1] if len(parts) > 1 else ""
+            skip = bool(skip_re and re.search(skip_re, subject, re.I))
+        elif line.strip() and when and not skip:
+            hist[line.strip()].append(when)
+    return hist
+
+
+def _median(xs):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
+def cmd_calibrate(cx: Cortex, a):
+    """Разбор в конце квартала: где были уверены, а не сработало.
+    Инструмент показывает данные и предлагает правки — меняет правила человек."""
+    rates = cx.schema["profiles"].get("change_rate") or {}
+    conf = cx.schema["profiles"].get("calibration") or {}
+    hist = _git_history(cx, conf.get("skip_commits"))
+    onboarding_days = int(conf.get("onboarding_days", 14))
+    min_span = int(conf.get("min_observation_days", 45))
+    min_points = int(conf.get("min_changes", 3))
+
+    # --- 1. распад: наблюдаемая частота изменений против объявленной ---
+    decay_rows = []
+    for n in cx.nodes:
+        if n.layer != "curated" or n.path.stem in ("_index", "_registry"):
+            continue    # MOC меняется при каждом новом узле: это структурный шум,
+                        # а не частота изменений объекта реального мира
+        rel = "GROUND/" + str(n.path.relative_to(cx.ground))
+        dates = sorted({d for d in hist.get(rel, [])})
+        if len(dates) < 2:
+            continue
+        first = datetime.date.fromisoformat(dates[0])
+        last = datetime.date.fromisoformat(dates[-1])
+        if (last - first).days < min_span:
+            continue          # объект ещё не наблюдали достаточно долго
+        # Первые дни после заведения узла — это онбординг, а не жизнь объекта.
+        settled = [d for d in dates
+                   if (datetime.date.fromisoformat(d) - first).days >= onboarding_days]
+        if len(settled) < min_points:
+            continue
+        gaps = []
+        for i in range(1, len(settled)):
+            d1 = datetime.date.fromisoformat(settled[i - 1])
+            d2 = datetime.date.fromisoformat(settled[i])
+            gaps.append(abs((d2 - d1).days))
+        gaps = [g for g in gaps if g > 0]
+        if not gaps:
+            continue
+        observed = _median(gaps)
+        declared = n["change_rate"] or "unknown"
+        ttl = cx.ttl_for(n)
+        # Знание считалось свежим дольше, чем объект реально стоял на месте.
+        if observed and observed * 2 < ttl:
+            better = min(rates, key=lambda k: abs((rates[k] or {}).get("ttl_days", 90) - observed),
+                         default=None)
+            decay_rows.append((n, declared, observed, ttl, better))
+    decay_rows.sort(key=lambda r: r[2])
+
+    # --- 2. лестница: заявленная ступень против исхода ставок ---
+    bets = [n for n in cx.nodes if n["node_type"] == "bet" and n["outcome"] in ("met", "missed")]
+    by_step = defaultdict(lambda: [0, 0])
+    for b in bets:
+        step = int(b["cp"] or 0)
+        by_step[step][0 if b["outcome"] == "met" else 1] += 1
+    ladder_rows = [(step, met, missed) for step, (met, missed) in sorted(by_step.items())]
+    min_sample = int(conf.get("min_bets_per_step", 3))
+    overrated = [(s, m, ms) for s, m, ms in ladder_rows if ms >= m and (m + ms) >= min_sample]
+    thin = [(s, m, ms) for s, m, ms in ladder_rows if ms >= m and (m + ms) < min_sample]
+
+    # --- 3. слепые зоны: провал без единого артефакта ---
+    blind = [b for b in bets if b["outcome"] == "missed" and not (b["sources"] or [])]
+
+    if a.json:
+        print(json.dumps({
+            "decay": [{"node": n.id, "declared": d, "observed_days": o, "ttl_days": ttl,
+                       "suggest": better} for n, d, o, ttl, better in decay_rows],
+            "ladder": [{"step": s, "met": m, "missed": ms} for s, m, ms in ladder_rows],
+            "blind_spots": [b.id for b in blind],
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    L = []
+    w = L.append
+    w(bold("Калибровка"))
+    w(dim("  инструмент показывает данные и предлагает правки. Правила меняете вы,\n"
+          "  и только здесь: линейка, которую правят по ходу, показывает что угодно\n"))
+
+    w(bold("1. Срок годности против реальной частоты изменений"))
+    if not hist:
+        w(dim("  истории git нет — частоту изменений посчитать не из чего"))
+    elif not decay_rows:
+        w(dim("  расхождений нет: объявленные сроки годности соответствуют наблюдаемым"))
+    else:
+        w(dim(f"  узлов, где знание считалось свежим дольше, чем объект стоял на месте: "
+              f"{len(decay_rows)}"))
+        w(dim(f"  (первые {onboarding_days} дн. после заведения узла и технические коммиты "
+              f"не в счёт)\n"))
+        for n, declared, observed, ttl, better in decay_rows[:a.top]:
+            w(f"  {ylw('●')} {str(n.title)[:44]:44}")
+            w(dim(f"      объявлено {declared} (годен {ttl} дн.), "
+                  f"а менялся раз в {observed:.0f} дн. → ставить {better}"))
+    w("")
+
+    w(bold("2. Лестница против исходов"))
+    if not bets:
+        w(dim("  закрытых ставок нет: калибровать лестницу не на чем.\n"
+              "  Ставка закрывается полем outcome: met | missed"))
+    else:
+        w(f"  {'ступень':>8} {'сбылось':>9} {'сорвалось':>11}")
+        for s, m, ms in ladder_rows:
+            mark = red("●") if ms >= m else grn("●")
+            w(f"  {mark} {s:>6} {m:>9} {ms:>11}")
+        if overrated:
+            w("")
+            w(dim("  переоценённые ступени: заявлялись сильнее, чем оказались."))
+            for s, m, ms in overrated:
+                w(f"      ступень {s}: из {m + ms} обещаний доехало {m}")
+            w(dim("      → сдвиньте формулировку этой ступени вниз в SCHEMA/ladder.yaml"))
+        if thin:
+            w("")
+            w(dim(f"  данных мало (меньше {min_sample} ставок на ступень) — "
+                  f"это наблюдение, а не вывод:"))
+            for s, m, ms in thin:
+                w(dim(f"      ступень {s}: {m + ms} обещаний, доехало {m}"))
+    w("")
+
+    w(bold("3. Слепые зоны"))
+    if blind:
+        w(dim("  сорвалось без единого артефакта — здесь не хватало узла, а не усердия:"))
+        for b in blind[:a.top]:
+            w(f"  {red('●')} {b.title}")
+    else:
+        w(dim("  не обнаружено"))
+
+    text = "\n".join(L)
+    print(text)
+
+    if a.write:
+        d = cx.ground / "DECIDE" / "decisions"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / f"{TODAY}-calibration.md"
+        plain = re.sub(r"\033\[[0-9;]*m", "", text)
+        f.write_text(f"# Калибровка {TODAY}\n\n" + plain +
+                     "\n\n## Решение\n\n<что меняем в ladder.yaml и profiles.yaml и почему>\n",
+                     encoding="utf-8")
+        print(grn(f"\n✓ записано: {f.relative_to(cx.root)}"))
+        print(dim("  правки в правила вносите руками, отдельным коммитом"))
+    return 0
+
+
+def cmd_agenda(cx: Cortex, a):
+    """Пять минут в день: что требует внимания и почему именно сегодня."""
+    pid = active_profile(cx, a.as_profile)
+    lines = []
+    errs = [i for i in run_gate(cx) if i.sev == "ERROR"]
+    if errs:
+        lines.append((red("●"), f"память сломана: {len(errs)} ошибок гейта",
+                      "cortex gate --all"))
+
+    n_intake, age = _intake_age(cx)
+    if n_intake:
+        overdue = age is not None and age > a.queue_days
+        lines.append((red("●") if overdue else ylw("●"),
+                      f"очередь: {n_intake} записей" +
+                      (f", самой старой {age} дн." if age is not None else ""),
+                      "cortex intake list"))
+
+    drafts = [n for n in cx.nodes if n["status"] == "draft"]
+    if pid:
+        drafts = [n for n in drafts if str(n["captured_by"]) == f"profile:{pid}"] or drafts
+    if drafts:
+        lines.append((ylw("●"), f"ждёт вашей приёмки: {len(drafts)} узлов", "cortex review"))
+
+    scope_nodes = [n for n in cx.nodes if n.layer == "curated" and
+                   (not pid or cx.in_my_zone(pid, n))]
+    stale = [n for n in scope_nodes if cx.ripeness_of(n)[0] == "wilting"]
+    if stale:
+        lines.append((ylw("●"), f"протухло в вашей зоне: {len(stale)}",
+                      "cortex stale — верифицировать или понизить CP"))
+
+    if pid:
+        out, _ = _seams(cx, pid)
+        weak = [(n, f, tg) for n, f, tg in out if (cx.effective_cp(tg) or 9) <= 3]
+        if weak:
+            lines.append((red("●"),
+                          f"стыки на слабом звене: {len(weak)} — обещание не прочнее их",
+                          "cortex seams"))
+        subs_stale = [n for n in cx.profile_subs(pid) if cx.ripeness_of(n)[0] == "wilting"]
+        if subs_stale:
+            lines.append((ylw("●"), f"протухло в подписках: {len(subs_stale)}",
+                          "спросить владельца: " + ", ".join(
+                              sorted({str(n["owner"]) for n in subs_stale})[:3])))
+
+    drift = sum(1 for n in cx.nodes if n.layer in ("curated", "decisions")
+                and cx.ripeness_of(n)[0] and n["ripeness"] != cx.ripeness_of(n)[0])
+    if drift:
+        lines.append((dim("○"), f"вычисляемые поля разошлись у {drift} узлов",
+                      "cortex refresh"))
+
+    if a.json:
+        print(json.dumps({"profile": pid,
+                          "items": [{"text": txt, "action": act} for _, txt, act in lines]},
+                         ensure_ascii=False, indent=2))
+        return 0
+    head = f"Повестка{' · ' + pid if pid else ''}"
+    print(bold(head))
+    if not lines:
+        print(grn("  чисто — ничего не требует действия"))
+        return 0
+    print()
+    for mark, txt, act in lines:
+        print(f"  {mark} {txt}")
+        print(dim(f"      {act}"))
+    print(dim("\n  это пять минут в день: прочитать список и решить, что делаете вы, "
+              "а что подождёт"))
+    return 0
+
+
+def cmd_profiles(cx: Cortex, a):
+    profs = cx.profiles()
+    if getattr(a, "json", False):
+        print(json.dumps([{"id": pid, "name": pr.get("name"), "writes": cx.profile_writes(pid),
+                           "subscriptions": [n.id for n in cx.profile_subs(pid)]}
+                          for pid, pr in profs.items()], ensure_ascii=False, indent=2))
+        return 0
+    wrote = Counter(str(n["captured_by"]) for n in cx.nodes if n["captured_by"])
+    drafts = Counter(str(n["captured_by"]) for n in cx.nodes if n["status"] == "draft")
+    active = active_profile(cx, a.as_profile)
+    print(bold("Профили PO"))
+    print(dim("  зоны пересекаются сознательно: одна цель обычно требует нескольких PO\n"))
+    if not profs:
+        print(ylw("  ни одного не объявлено — SCHEMA/agents.yaml, секция profiles"))
+        return 0
+    print(f"  {'профиль':16} {'зоны записи':30} {'узлов':>6} {'черновиков':>11}")
+    for pid, pr in profs.items():
+        me = grn(" ←вы") if pid == active else ""
+        zones = ", ".join(cx.profile_writes(pid)) or "—"
+        key = f"profile:{pid}"
+        print(f"  {pid:16} {zones:30} {wrote.get(key, 0):6} {drafts.get(key, 0):11}{me}")
+    cur = cx.core_curator()
+    print(dim(f"\n  ядро (scope: org): куратор {cur or 'не назначен'}, изменения через PR"))
+    if not cur or cur.startswith("<"):
+        print(ylw("  куратор ядра не назначен — увядание ядра не попадёт ни в чью очередь"))
+    return 0
+
+
+def cmd_schema(cx: Cortex, a):
+    src = cx.schema_dir()
+    dst = cx.ground / "SCHEMA"
+    if a.action == "show":
+        print(bold(f"схема: {src}"))
+        for name in Cortex.SCHEMA_FILES:
+            f = src / f"{name}.yaml"
+            print(f"  {'✓' if f.exists() else '·'} {name}.yaml"
+                  + dim(f"  {len((cx.schema.get(name) or {}))} разделов" if f.exists() else "  нет"))
+        print(dim("\n  типов узлов: %d · рёбер: %d · агентов: %d"
+                  % (len(cx.node_types()), len(cx.edge_fields()), len(cx.agent_zones()))))
+        return 0
+    if src.resolve() == dst.resolve():
+        print(ylw("схема уже своя — правьте GROUND/SCHEMA/*.yaml"))
+        return 0
+    dst.mkdir(parents=True, exist_ok=True)
+    for name in Cortex.SCHEMA_FILES:
+        f = src / f"{name}.yaml"
+        if f.exists() and not (dst / f"{name}.yaml").exists():
+            (dst / f"{name}.yaml").write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
+    print(grn(f"✓ схема скопирована в {dst.relative_to(cx.root)} — теперь она ваша и адаптируется под вас"))
+    return 0
+
+
+# Что заполняет init: имя поля · флаг и переменная окружения · о чём спросить ·
+# ключ в config.yaml вместе с отступом. Замена идёт построчно, а не через разбор
+# YAML, чтобы комментарии шаблона остались на месте.
+INIT_FIELDS = (
+    ("company",  "CORTEX_COMPANY",  "Организация",                "company"),
+    ("product",  "CORTEX_PRODUCT",  "Продукт",                    "  name"),
+    ("slug",     "CORTEX_SLUG",     "Slug продукта (ascii)",      "  slug"),
+    ("idea",     "CORTEX_IDEA",     "Идея продукта в 1–2 фразах", "  idea"),
+    ("engineer", "CORTEX_ENGINEER", "Продуктовый инженер",        "    product_engineer"),
+)
+
+
+def _init_set_idea(text: str, value: str) -> str:
+    """idea — свёрнутый блок: заменяется заголовок вместе с его строками."""
+    body = [ln.strip() for ln in value.splitlines() if ln.strip()] or [value.strip()]
+    out, lines, i = [], text.split("\n"), 0
+    while i < len(lines):
+        if lines[i].startswith("  idea:"):
+            out.append("  idea: >")
+            out.extend("    " + ln for ln in body)
+            i += 1
+            while i < len(lines) and lines[i].startswith("    "):
+                i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def cmd_init(cx: Cortex, a):
+    cfg = cx.ground / "config.yaml"
+    if not cfg.exists():
+        die(f"нет {cfg} — это не vault Кортекса")
+    text = cfg.read_text(encoding="utf-8")
+    interactive = sys.stdin.isatty()
+
+    got = {}
+    for name, env, prompt, key in INIT_FIELDS:
+        v = (getattr(a, name, None) or os.environ.get(env, "") or "").strip()
+        if not v and interactive:
+            v = input(f"  {prompt}: ").strip()
+        if v:
+            got[name] = (v, key)
+
+    if not got:
+        # Записать ноль полей и отчитаться успехом — худший исход: агент считает
+        # шаг сделанным, а config.yaml остаётся с плейсхолдерами. Поэтому отказ.
+        die("init нечего записать: ни флагов, ни переменных окружения, "
+            "а спросить некого — ввод не интерактивный.\n"
+            "  cortex init --company … --product … --slug … --idea … --engineer …\n"
+            "  то же принимают CORTEX_COMPANY · CORTEX_PRODUCT · CORTEX_SLUG · "
+            "CORTEX_IDEA · CORTEX_ENGINEER")
+
+    if "slug" in got and not re.fullmatch(r"[a-z0-9][a-z0-9-]*", got["slug"][0]):
+        die(f"slug '{got['slug'][0]}': нужен ascii-slug вида [a-z0-9][a-z0-9-]*")
+
+    for name, (v, key) in got.items():
+        if name == "idea":
+            text = _init_set_idea(text, v)
+        else:
+            text = re.sub(rf"^{re.escape(key)}:.*$", f"{key}: {_q(v)}", text, count=1, flags=re.M)
+    text = re.sub(r"^created:.*$", f"created: {TODAY}", text, count=1, flags=re.M)
+    cfg.write_text(text, encoding="utf-8")
+
+    print(grn("✓ записано в config.yaml: " + ", ".join(n for n, *_ in INIT_FIELDS if n in got)))
+    # Что осталось — перечитываем файл, а не список этого запуска: поле могло
+    # быть заполнено раньше.
+    holes = [t for t in _setup_todo(cx) if t[0].startswith("в config.yaml")]
+    if holes:
+        print(ylw("  " + holes[0][0]))
+    print(dim("  дальше: cortex doctor · cortex gate"))
+    return 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="cortex", description="Кортекс: память организации для ИИ-агентов PO")
+    ap.add_argument("--root", help="корень vault (по умолчанию ищется вверх по дереву)")
+    ap.add_argument("--as", dest="as_profile", metavar="ПРОФИЛЬ",
+                    help="от чьего имени работаем: профиль из SCHEMA/agents.yaml "
+                         "(или переменная CORTEX_PROFILE)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def add(name, fn, help_):
+        p = sub.add_parser(name, help=help_)
+        p.set_defaults(fn=fn)
+        # --as принимается и до, и после подкоманды: человек напишет как удобно,
+        # а SUPPRESS не даёт подкоманде затереть значение, заданное глобально.
+        p.add_argument("--as", dest="as_profile", metavar="ПРОФИЛЬ",
+                       default=argparse.SUPPRESS,
+                       help="от чьего имени работаем (см. cortex profiles)")
+        return p
+
+    add("doctor", cmd_doctor, "самодиагностика: что загружено и чем проверяется")
+    p = add("gate", cmd_gate, "проверить память по схеме")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--all", action="store_true", help="показать все находки")
+    p = add("refresh", cmd_refresh, "пересчитать вычисляемые поля (свежесть, распад CP)")
+    p.add_argument("--dry-run", action="store_true")
+    p = add("report", cmd_report, "узлы, зоны, спелость по Нексусам")
+    p.add_argument("--json", action="store_true")
+    p = add("ask", cmd_ask, "что память знает по теме — с якорями")
+    p.add_argument("query", nargs="+")
+    p.add_argument("--top", type=int, default=6)
+    p.add_argument("--scope")
+    p.add_argument("--nexus")
+    p.add_argument("--json", action="store_true")
+    p = add("context", cmd_context, "контекст узла, цели или зоны — JSON для агента")
+    p.add_argument("--node")
+    p.add_argument("--kr")
+    p.add_argument("--scope")
+    p.add_argument("--depth", type=int, default=1)
+    p.add_argument("--json", action="store_true", default=True)
+    p = add("who", cmd_who, "кому писать по теме")
+    p.add_argument("topic", nargs="+")
+    p.add_argument("--json", action="store_true")
+    p = add("stale", cmd_stale, "очередь верификации протухшего")
+    p.add_argument("--soon", action="store_true", help="включить созревающие")
+    p.add_argument("--top", type=int, default=25)
+    p.add_argument("--json", action="store_true")
+    p = add("gaps", cmd_gaps, "знание, не служащее ни одной цели")
+    p.add_argument("--top", type=int, default=25)
+    add("agents", cmd_agents, "агенты и их зоны записи")
+    p = add("intake", cmd_intake, "очередь неразобранного")
+    p.add_argument("action", choices=["list", "route"])
+    p.add_argument("path", nargs="?")
+    p = add("node", cmd_node, "контракт записи узла")
+    p.add_argument("action", choices=["new", "check", "set"])
+    p.add_argument("target", nargs="?", help="node_id для check и set")
+    p.add_argument("--id")
+    p.add_argument("--title", default="")
+    p.add_argument("--nexus")
+    p.add_argument("--type", default="entity")
+    p.add_argument("--kind", default="empirical")
+    p.add_argument("--owner")
+    p.add_argument("--scope")
+    p.add_argument("--cp", type=float, default=3)
+    p.add_argument("--change-rate", dest="change_rate", default="unknown")
+    p.add_argument("--ttl", type=int)
+    p.add_argument("--source", action="append")
+    p.add_argument("--satisfies", action="append")
+    p.add_argument("--depends-on", dest="depends_on", action="append")
+    p.add_argument("--based-on", dest="based_on", action="append")
+    p.add_argument("--serves")
+    p.add_argument("--by", dest="by", default="human")
+    p.add_argument("--status", choices=["draft", "accepted"])
+    p.add_argument("--shared-with", dest="shared_with", action="append",
+                   help="профили, которые тоже вправе править этот узел (зоны пересекаются)")
+    p.add_argument("--aliases", action="append", help="как ещё называют этот объект в речи")
+    p.add_argument("--body", default="")
+    p.add_argument("--force", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p = add("nexus", cmd_nexus, "Нексусы: список и объявление")
+    p.add_argument("action", choices=["list", "add"], nargs="?", default="list")
+    p.add_argument("slug", nargs="?")
+    p.add_argument("--name")
+    p.add_argument("--scope", default="org")
+    p.add_argument("--owner")
+    p.add_argument("--types", action="append")
+    p.add_argument("--purpose")
+    p = add("calibrate", cmd_calibrate, "итоги квартала: где были уверены, а не сработало")
+    p.add_argument("--write", action="store_true", help="записать разбор в DECIDE/decisions/")
+    p.add_argument("--top", type=int, default=12)
+    p.add_argument("--json", action="store_true")
+    p = add("conflicts", cmd_conflicts, "расхождения между зонами: обе стороны, без выбора")
+    p.add_argument("--mark", action="store_true", help="пометить спорными и ограничить CP")
+    p.add_argument("--resolve", help="снять спор с узла (требует --source)")
+    p.add_argument("--source", action="append")
+    p.add_argument("--top", type=int, default=10)
+    p.add_argument("--json", action="store_true")
+    p = add("agenda", cmd_agenda, "пять минут в день: что требует внимания")
+    p.add_argument("--queue-days", dest="queue_days", type=int, default=3,
+                   help="через сколько дней очередь считается просроченной")
+    p.add_argument("--json", action="store_true")
+    p = add("pack", cmd_pack, "собрать срез памяти под профиль")
+    p.add_argument("--out")
+    p.add_argument("--stdout", action="store_true")
+    p.add_argument("--all", action="store_true", help="пересобрать срезы всех профилей")
+    p.add_argument("--core-limit", dest="core_limit", type=int, default=40)
+    p.add_argument("--seam-limit", dest="seam_limit", type=int, default=15)
+    p.add_argument("--budget", type=int, default=60000, help="ориентир размера в символах")
+    p.add_argument("--json", action="store_true")
+    p = add("seams", cmd_seams, "стыки с другими PO: во что упираюсь и на меня рассчитывают")
+    p.add_argument("--top", type=int, default=15)
+    p.add_argument("--json", action="store_true")
+    p = add("review", cmd_review, "очередь приёмки: что агенты собрали и ждёт вашего да")
+    p.add_argument("--nexus")
+    p.add_argument("--accept", action="append", default=[])
+    p.add_argument("--reject", action="append", default=[])
+    p.add_argument("--accept-all", dest="accept_all", action="store_true")
+    p.add_argument("--top", type=int, default=8)
+    p.add_argument("--json", action="store_true")
+    p = add("resolve", cmd_resolve, "о ком или о чём речь: упоминание → узел памяти")
+    p.add_argument("mention", nargs="+")
+    p.add_argument("--top", type=int, default=3)
+    p.add_argument("--json", action="store_true")
+    p = add("profiles", cmd_profiles, "профили PO: зоны, подписки, что каждый записал")
+    p.add_argument("--json", action="store_true")
+    p = add("schema", cmd_schema, "схема памяти: показать или завести свою")
+    p.add_argument("action", choices=["show", "init"], nargs="?", default="show")
+    p = add("init", cmd_init, "привязать vault к организации")
+    for name, env, prompt, _key in INIT_FIELDS:
+        p.add_argument(f"--{name}", help=f"{prompt} (или {env})")
+
+    a = ap.parse_args(argv)
+    if not hasattr(a, "as_profile"):
+        a.as_profile = None
+    root = pathlib.Path(a.root).resolve() if a.root else find_root()
+    try:
+        cx = Cortex(root)
+    except YamlError as e:
+        die(str(e))
+    return a.fn(cx, a)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except BrokenPipeError:
+        # Вывод оборвали через `| head` — это не ошибка инструмента.
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except Exception:
+            pass
+        sys.exit(0)

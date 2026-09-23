@@ -6,6 +6,10 @@ paf_step: null
 sprint_phase: null
 kind: normative
 owner: Product Ops
+scope: org
+change_rate: low
+captured_by: human
+cp: 9
 confidence: 1.0
 sources: ["[S1]", "[S2]", "sa_documentation/nexus_schema.md", "sa_documentation/naming_conventions.md"]
 updated: 2026-08-20

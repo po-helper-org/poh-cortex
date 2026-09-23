@@ -1,25 +1,33 @@
-# Реестр Нексусов вашей организации. Источник истины для поля `nexus` в узлах:
-# значение frontmatter `nexus:` обязано быть одним из slug ниже, иначе гейт падает.
+# Реестр Нексусов. Источник истины для поля `nexus` и для типов узлов:
+# node_types объявляются здесь, а не захардкожены в инструменте — поэтому
+# новый объект управления заводится декларацией, а не правкой кода.
 #
-# source: default — из мастер-каталога PAF (4 минимальных + 3 опциональных);
-# source: custom  — ваш Нексус под конкретное решение (напр. sellers, supply-chain).
-#
-# owner: пока роль PAF. После заполнения GROUND/config.yaml замените роль на имя
-# человека из `team.roster` (или оставьте роль, если она делегирована Кортексу).
-#
-# Нексусы okr / pulse / jira здесь НЕ перечислены: их регистрирует движок
-# (`paf_index build`) в момент, когда появляется хребет OKR или эпизоды PULSE.
+# scope   — чей это объект: org (общий на организацию) | team:<имя> | product:<имя>.
+#           Общие Нексусы (IT-ландшафт, орг.структура, операционная модель) —
+#           org. Стратегия и эксперименты — по команде.
+# shared  — можно ли писать сюда из другой зоны.
+# change_rate — как быстро устаревает знание этого объекта (SCHEMA/profiles.yaml).
+
+version: 2
 
 nexus_types:
-  # --- минимальный набор PAF (инстанцируется всегда) ---
-  - {slug: product,   source: default, name: Нексус продукта,   owner: Product Engineer,   purpose: "идея продукта, фичи, Видение, гэп до Видения", onboarded: todo}
-  - {slug: customer,  source: default, name: Нексус потребителя, owner: Product Engineer,   purpose: "сегменты, работы (JTBD), боли, гипотеза mNSM", onboarded: todo}
-  - {slug: market,    source: default, name: Нексус рынка,      owner: Portfolio Manager,  purpose: "объём и динамика рынка, тренды, конкуренты, Ставки (Bets)", onboarded: todo}
-  - {slug: growth,    source: default, name: Нексус системы роста, owner: Growth Engineer, purpose: "каналы, модель монетизации, AI-COGS, рычаги (Lever) роста NPV", onboarded: todo}
+  # --- минимальный набор PAF ---
+  - {slug: product,  source: default, name: Нексус продукта, scope: org, shared: true, owner: Product Engineer, change_rate: medium, node_types: [product, feature, value-proposition, service, interface, platform], purpose: "идея, фичи, Видение, гэп до Видения", onboarded: todo}
+  - {slug: customer, source: default, name: Нексус потребителя, scope: org, shared: true, owner: Product Engineer, change_rate: medium, node_types: [segment, need], purpose: "сегменты, работы, боли, гипотеза mNSM", onboarded: todo}
+  - {slug: market,   source: default, name: Нексус рынка, scope: org, shared: true, owner: Portfolio Manager, change_rate: medium, node_types: [entity, concept], purpose: "объём и динамика рынка, тренды, конкуренты", onboarded: todo}
+  - {slug: growth,   source: default, name: Нексус системы роста, scope: org, shared: true, owner: Growth Engineer, change_rate: high, node_types: [entity, concept, experiment], purpose: "каналы, монетизация, рычаги роста", onboarded: todo}
 
-  # --- опциональные типы PAF (отключите те, что вам не нужны) ---
-  - {slug: ops-model, source: default, name: Нексус операционной модели, owner: Product Ops, purpose: "правила игры: принципы, кадренсы, граница делегирования, протокол памяти", onboarded: partial}
-  - {slug: company,   source: default, name: Нексус портфеля организации, owner: Portfolio Manager, purpose: "портфель продуктов и бизнес-юнитов, скаутинг на уровне компании", onboarded: todo}
-  - {slug: team,      source: default, name: Нексус организационной структуры, owner: Product Ops, purpose: "People Graph: кто, на какой роли, с кем связан, по каким вопросам полезен", onboarded: todo}
+  # --- операционные, общие на департамент ---
+  - {slug: ops-model, source: default, name: Нексус операционной модели, scope: org, shared: true, owner: Product Ops, change_rate: low, node_types: [operating-model, process, standard], purpose: "правила игры: принципы, границы делегирования, протокол памяти", onboarded: partial}
+  - {slug: team,      source: default, name: Организационная структура, scope: org, shared: true, owner: Product Ops, change_rate: low, node_types: [person], purpose: "кто владелец чего, кто кому подчиняется, к кому идти", onboarded: todo}
+  - {slug: company,   source: default, name: Портфель организации, scope: org, shared: true, owner: Portfolio Manager, change_rate: low, node_types: [entity, product], purpose: "портфель продуктов и бизнес-юнитов", onboarded: todo}
 
-  # --- ваши кастомные Нексусы: добавляйте через /paf-nexus-create ---
+  # --- объекты решений корпоративного PO: расскомментируйте нужные ---
+  # Заводите Нексус тогда, когда из-за незнания объекта вы уже приняли плохое
+  # решение. Восемь Нексусов на старте — это справочник вместо управления.
+  #
+  # - {slug: landscape,   source: custom, name: IT-ландшафт, scope: org, shared: true, owner: Product Ops, change_rate: high, node_types: [system-component, integration], purpose: "системы, контракты, SLA, версии схем — можно ли обещать срок по интеграции"}
+  # - {slug: dependencies, source: custom, name: Внешние зависимости, scope: org, shared: true, owner: Product Engineer, change_rate: high, node_types: [dependency], purpose: "владельцы, каналы, обещания, латентность ответа"}
+  # - {slug: processes,   source: custom, name: Бизнес-процессы, scope: org, shared: true, owner: Product Ops, change_rate: medium, node_types: [process], purpose: "как реально проходит заказ, оплата, возврат, поддержка"}
+  # - {slug: experiments, source: custom, name: Результаты экспериментов, scope: "team:<имя>", shared: false, owner: Product Engineer, change_rate: low, node_types: [experiment, precedent], purpose: "что пробовали, что вышло, где лестница врала"}
+  # - {slug: strategy,    source: custom, name: Стратегия и ставки, scope: "team:<имя>", shared: false, owner: Product Engineer, change_rate: medium, node_types: [objective, key-result, decision], purpose: "цели, ставки, приоритеты и история их изменений"}

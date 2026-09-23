@@ -16,7 +16,7 @@ sources: ["onboarding:interview"]
 updated: 2026-01-01
 ttl_days: 60                     # рост протухает быстрее всего
 ripeness: fresh
-title: Канал — партнёрские внедренцы
+title: Канал — <название канала>
 based_on: []                     # на каком узле продукта держится
 ---
 ```

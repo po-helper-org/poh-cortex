@@ -1,0 +1,24 @@
+# Ядро организации: изменения проходят через ревью куратора.
+#
+# Ядро — это память, которой пользуются все профили PO: люди и оргструктура,
+# операционная модель, схема памяти. Пять профилей, пишущих в неё напрямую,
+# за квартал дают пять версий одного человека. Поэтому здесь PR, а не push.
+#
+# Зоны PO (scope: team:* и product:*) сюда не входят: свой PO пишет в свою
+# зону напрямую, и ревью там — лишний обряд.
+#
+# Замените @curator на GitHub-логин ответственного за ядро.
+
+/GROUND/SCHEMA/                 @curator
+/GROUND/NEXUS/_registry.yaml    @curator
+/GROUND/NEXUS/team/             @curator
+/GROUND/NEXUS/ops-model/        @curator
+/GROUND/NEXUS/company/          @curator
+/GROUND/config.yaml             @curator
+
+# Лестница и профили распада — правила измерения. Их правка задним числом
+# меняет все прошлые числа, поэтому она всегда ревьюится.
+/GROUND/SCHEMA/ladder.yaml      @curator
+/GROUND/SCHEMA/profiles.yaml    @curator
+/GROUND/SCHEMA/checks.yaml      @curator
+/GROUND/SCHEMA/gates.yaml       @curator

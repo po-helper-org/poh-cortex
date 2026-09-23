@@ -1,0 +1,32 @@
+# Рёбра пишутся полями frontmatter и выводятся детерминированно.
+# Связь, упомянутая только в тексте, графом не становится.
+# external: true — ссылка наружу (ключ трекера), её целостность не проверяется.
+
+version: 2
+
+fields:
+  # ось ценности: segment -has_need-> need <-addresses- vp <-realizes- feature -> product
+  has_need:          {edge: HAS_NEED,     from: segment,           to: need}
+  addresses:         {edge: ADDRESSES,    from: value-proposition, to: need}
+  realizes:          {edge: REALIZES,     from: feature,           to: value-proposition}
+  depends_on:        {edge: DEPENDS_ON}
+  based_on:          {edge: BASED_ON}
+  # хребет целей
+  satisfies:         {edge: SATISFIES,    to: key-result}
+  serves:            {edge: SERVES,       to: objective}
+  delivered_by:      {edge: DELIVERED_BY, external: true}
+  tracker:           {edge: TRACKED_AS,   external: true}   # ключи задач вашего трекера
+  jira:              {edge: TRACKED_AS,   external: true}   # синоним для исторических узлов
+  # люди и владение
+  owns_node:         {edge: OWNS}
+  reports_to:        {edge: REPORTS_TO,   to: person}
+  manages:           {edge: MANAGES,      to: person}
+  collaborates_with: {edge: COLLABORATES, to: person}
+  # операционка и решения
+  mentions:          {edge: MENTIONS, external_pattern: "^task-[A-Z]+-[0-9]+$"}
+  involves:          {edge: INVOLVES}
+  affects:           {edge: AFFECTS}
+  supersedes:        {edge: SUPERSEDES}
+  contradicts:       {edge: CONTRADICTS}
+  nexus_refs:        {edge: REFERS_TO,    external: true}
+  evidences:         {edge: EVIDENCED_BY, external: true}
