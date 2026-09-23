@@ -1699,7 +1699,10 @@ def cmd_pack(cx: Cortex, a):
     w = L.append
     w(f"# Срез памяти: {prof.get('name') or pid}")
     w("")
-    w(f"Собран {TODAY} командой `cortex pack --as {pid}`. Это **производный артефакт**: "
+    # Дату сборки в тело не пишем: она сделала бы срез разным при одинаковой
+    # памяти, и проверка «срез не отстал» краснела бы на следующий день после
+    # коммита, ничего не сказав о содержимом. Когда собрали — знает git.
+    w(f"Собран командой `cortex pack --as {pid}`. Это **производный артефакт**: "
       f"истина — в репозитории, срез пересобирается и не правится руками.")
     w("")
     w(f"- **Ваш профиль:** `{pid}`" + (f" · {prof.get('person')}" if prof.get("person") else ""))
@@ -2232,24 +2235,76 @@ def cmd_schema(cx: Cortex, a):
     return 0
 
 
+# Что заполняет init: имя поля · флаг и переменная окружения · о чём спросить ·
+# ключ в config.yaml вместе с отступом. Замена идёт построчно, а не через разбор
+# YAML, чтобы комментарии шаблона остались на месте.
+INIT_FIELDS = (
+    ("company",  "CORTEX_COMPANY",  "Организация",                "company"),
+    ("product",  "CORTEX_PRODUCT",  "Продукт",                    "  name"),
+    ("slug",     "CORTEX_SLUG",     "Slug продукта (ascii)",      "  slug"),
+    ("idea",     "CORTEX_IDEA",     "Идея продукта в 1–2 фразах", "  idea"),
+    ("engineer", "CORTEX_ENGINEER", "Продуктовый инженер",        "    product_engineer"),
+)
+
+
+def _init_set_idea(text: str, value: str) -> str:
+    """idea — свёрнутый блок: заменяется заголовок вместе с его строками."""
+    body = [ln.strip() for ln in value.splitlines() if ln.strip()] or [value.strip()]
+    out, lines, i = [], text.split("\n"), 0
+    while i < len(lines):
+        if lines[i].startswith("  idea:"):
+            out.append("  idea: >")
+            out.extend("    " + ln for ln in body)
+            i += 1
+            while i < len(lines) and lines[i].startswith("    "):
+                i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
 def cmd_init(cx: Cortex, a):
     cfg = cx.ground / "config.yaml"
-    text = cfg.read_text(encoding="utf-8") if cfg.exists() else ""
-    def ask(env, prompt):
-        v = os.environ.get(env, "")
-        if not v and sys.stdin.isatty():
+    if not cfg.exists():
+        die(f"нет {cfg} — это не vault Кортекса")
+    text = cfg.read_text(encoding="utf-8")
+    interactive = sys.stdin.isatty()
+
+    got = {}
+    for name, env, prompt, key in INIT_FIELDS:
+        v = (getattr(a, name, None) or os.environ.get(env, "") or "").strip()
+        if not v and interactive:
             v = input(f"  {prompt}: ").strip()
-        return v
-    for env, prompt, key in [("CORTEX_COMPANY", "Организация", "company"),
-                             ("CORTEX_PRODUCT", "Продукт", "  name"),
-                             ("CORTEX_SLUG", "Slug продукта", "  slug"),
-                             ("CORTEX_ENGINEER", "Продуктовый инженер", "    product_engineer")]:
-        v = ask(env, prompt)
         if v:
+            got[name] = (v, key)
+
+    if not got:
+        # Записать ноль полей и отчитаться успехом — худший исход: агент считает
+        # шаг сделанным, а config.yaml остаётся с плейсхолдерами. Поэтому отказ.
+        die("init нечего записать: ни флагов, ни переменных окружения, "
+            "а спросить некого — ввод не интерактивный.\n"
+            "  cortex init --company … --product … --slug … --idea … --engineer …\n"
+            "  то же принимают CORTEX_COMPANY · CORTEX_PRODUCT · CORTEX_SLUG · "
+            "CORTEX_IDEA · CORTEX_ENGINEER")
+
+    if "slug" in got and not re.fullmatch(r"[a-z0-9][a-z0-9-]*", got["slug"][0]):
+        die(f"slug '{got['slug'][0]}': нужен ascii-slug вида [a-z0-9][a-z0-9-]*")
+
+    for name, (v, key) in got.items():
+        if name == "idea":
+            text = _init_set_idea(text, v)
+        else:
             text = re.sub(rf"^{re.escape(key)}:.*$", f"{key}: {_q(v)}", text, count=1, flags=re.M)
     text = re.sub(r"^created:.*$", f"created: {TODAY}", text, count=1, flags=re.M)
     cfg.write_text(text, encoding="utf-8")
-    print(grn("✓ vault привязан"))
+
+    print(grn("✓ записано в config.yaml: " + ", ".join(n for n, *_ in INIT_FIELDS if n in got)))
+    # Что осталось — перечитываем файл, а не список этого запуска: поле могло
+    # быть заполнено раньше.
+    holes = [t for t in _setup_todo(cx) if t[0].startswith("в config.yaml")]
+    if holes:
+        print(ylw("  " + holes[0][0]))
     print(dim("  дальше: cortex doctor · cortex gate"))
     return 0
 
@@ -2381,7 +2436,9 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p = add("schema", cmd_schema, "схема памяти: показать или завести свою")
     p.add_argument("action", choices=["show", "init"], nargs="?", default="show")
-    add("init", cmd_init, "привязать vault к организации")
+    p = add("init", cmd_init, "привязать vault к организации")
+    for name, env, prompt, _key in INIT_FIELDS:
+        p.add_argument(f"--{name}", help=f"{prompt} (или {env})")
 
     a = ap.parse_args(argv)
     if not hasattr(a, "as_profile"):
