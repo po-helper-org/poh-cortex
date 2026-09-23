@@ -10,7 +10,7 @@ required_keys: [nexus, node_id, node_type, kind, owner, sources, updated, ripene
 # Ключи смысла: не обязательны схемой, но именно они делают память пригодной
 # для решения. Их отсутствие видно в report, а не в гейте.
 meaning_keys: [cp, confidence, change_rate, scope, captured_by, ttl_days, status,
-               shared_with, aliases, disputed, contradicts, outcome]
+               shared_with, aliases, disputed, contradicts, outcome, stage]
 
 # Слой решений живёт по своим правилам: ставка и артефакт не принадлежат Нексусу,
 # у них другой жизненный цикл (артефакт не стареет, стареет знание о мире).
@@ -23,6 +23,11 @@ enums:
   change_rate: [high, medium, low, unknown]
   status: [draft, accepted, rejected]
   outcome: [met, missed]        # исход закрытой ставки — вход калибровки
+  # Стадия жизненного цикла фичи: какой риск ставка снимает прямо сейчас.
+  # 1 идея · 2 потребность · 3 ценность · 4 решение · 5 онбординг · 6 бизнес-модель.
+  # Со стадией не путать гейт: стадия говорит «какой риск», гейт — «при каком CP
+  # даём обещание». К календарю стадия не привязана.
+  stage: [1, 2, 3, 4, 5, 6]
   scope_kind: [org, team, product, personal]
 
 # Базовый каталог типов. Нексус может объявить свои — см. node_types в _registry.yaml.

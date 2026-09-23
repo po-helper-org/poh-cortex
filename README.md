@@ -132,6 +132,7 @@ bin/cortex agenda              пять минут в день: что треб�
 | конец квартала | `bin/cortex calibrate` — где были уверены, а не сработало | вы правите правила |
 
 Полный регламент с ответственными и порогами — [docs/operating-rhythm.md](docs/operating-rhythm.md).
+Что снимать с каждой встречи и куда это класть — [docs/ritual-contract.md](docs/ritual-contract.md).
 Признаки, по которым видно, что память живая, — [docs/memory-health.md](docs/memory-health.md).
 
 ## Структура
@@ -139,14 +140,15 @@ bin/cortex agenda              пять минут в день: что треб�
 ```
 bin/cortex                  инструмент: гейт, поиск, запись, отчёты
 GROUND/
-  config.yaml               организация, зоны, уровень зрелости, жёсткость гейта
+  config.yaml               организация, продукт, зоны, уровень зрелости
   SCHEMA/                   ← правила памяти как данные
     nodes.yaml              типы узлов и обязательные поля
     edges.yaml              рёбра: какое поле даёт какую связь
     profiles.yaml           распад: change_rate → срок годности
     ladder.yaml             лестница доказательств 2–9 и потолки
+    gates.yaml              при каком CP и к какой дате обещание уходит наружу
     agents.yaml             агенты и зоны записи
-    gate.yaml               жёсткость каждой проверки: error · warn · off
+    checks.yaml             жёсткость каждой проверки: error · warn · off
   NEXUS/                    знание: узлы с источниками
     _registry.yaml          Нексусы, их зоны и типы узлов
   DECIDE/                   обещания, артефакты, решения, наблюдения

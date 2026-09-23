@@ -361,7 +361,7 @@ class Cortex:
         except Exception as e:  # схема не должна падать трассировкой
             raise YamlError(f"{p}: {e}")
 
-    SCHEMA_FILES = ("nodes", "edges", "profiles", "agents", "ladder", "gate")
+    SCHEMA_FILES = ("nodes", "edges", "profiles", "agents", "ladder", "checks", "gates")
 
     def schema_dir(self) -> pathlib.Path:
         """Схема vault, а если её ещё нет — та, с которой поставлен инструмент.
@@ -600,15 +600,19 @@ class Issue:
 
 
 def _strict(cx, key, default="ERROR"):
-    """Жёсткость проверки: SCHEMA/gate.yaml → checks.<key>: error|warn|off.
+    """Жёсткость проверки: SCHEMA/checks.yaml → checks.<key>: error|warn|off.
 
     Настройка живёт в схеме, а не в config.yaml: возможность перевести проверку
     в off — та же власть, что и правка лестницы, и она не должна быть у агента.
     Старое место (config.yaml → gate:) читается как запасное, чтобы уже
     настроенные vault не сломались."""
-    schema_gate = (cx.schema.get("gate") or {}).get("checks") or {}
-    legacy = cx.config.get("gate") or {}
-    v = str(schema_gate.get(key) or legacy.get(key) or default).upper()
+    # Оба старых места читаются как запасные: SCHEMA/gate.yaml до переименования
+    # в checks.yaml и config.yaml → gate: до переезда настройки в схему.
+    schema_checks = (cx.schema.get("checks") or {}).get("checks") or {}
+    legacy_schema = (cx.schema.get("gate") or {}).get("checks") or {}
+    legacy_cfg = cx.config.get("gate") or {}
+    v = str(schema_checks.get(key) or legacy_schema.get(key)
+            or legacy_cfg.get(key) or default).upper()
     return {"ERROR": "ERROR", "WARN": "WARN", "OFF": None}.get(v, default)
 
 
@@ -955,6 +959,12 @@ def _setup_todo(cx: Cortex):
         todo.append(("лестница доказательств не откалибрована под ваш домен",
                      "SCHEMA/ladder.yaml → steps[*].yours: чем в вашем контуре "
                      "подтверждается каждая ступень"))
+
+    gates = (cx.schema["gates"].get("gates") or {})
+    if gates and not any(isinstance((g or {}).get("threshold"), int) for g in gates.values()):
+        todo.append(("гейты не заданы — непонятно, при каком CP даётся обещание наружу",
+                     "SCHEMA/gates.yaml → gates[*].threshold и lead_time_weeks; "
+                     "что считается обещанием наружу, знает руководитель"))
 
     empty = [s for s in cx.nexuses
              if not any(n["nexus"] == s and n.path.stem != "_index" for n in cx.nodes)]
