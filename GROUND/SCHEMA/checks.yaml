@@ -19,3 +19,4 @@ checks:
   unknown_agent: warn         # captured_by вне SCHEMA/agents.yaml
   missing_provenance: warn    # узел без captured_by: не видно, кто записал
   agent_zone_drift: warn      # зона агента ссылается на несуществующий Нексус
+  weakest_link_drift: error   # CP ставки выше слабейшей из её зависимостей

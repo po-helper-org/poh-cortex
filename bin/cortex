@@ -640,6 +640,30 @@ def run_gate(cx: Cortex) -> list[Issue]:
                     add(Issue(sev, f"GROUND/NEXUS/{d.name}/", "Нексус не объявлен в _registry.yaml",
                               "объявите его: cortex nexus add " + d.name))
 
+    # --- слабое звено: CP ставки не выше минимума её зависимостей ---
+    # Правило объявлено в ladder.yaml (rules.weakest_link), и без проверки оно
+    # остаётся пожеланием: ставку с CP 7 на зависимости со ступенью 2 никто не
+    # остановит. Именно так и появляется дата, названная под давлением.
+    if ((cx.schema["ladder"].get("rules") or {}).get("weakest_link")):
+        by_id = {n["node_id"]: n for n in cx.nodes if n["node_id"]}
+        for n in cx.nodes:
+            if n["node_type"] != "bet" or n["cp"] is None:
+                continue
+            deps = [by_id[d] for d in (n["depends_on"] or []) if d in by_id]
+            floors = [(d, cx.effective_cp(d)) for d in deps if cx.effective_cp(d) is not None]
+            if not floors:
+                continue
+            weak, low = min(floors, key=lambda kv: kv[1])
+            low = int(low) if float(low).is_integer() else round(low, 1)
+            if n["cp"] > low:
+                sev = _strict(cx, "weakest_link_drift", "ERROR")
+                if sev:
+                    add(Issue(sev, n.rel,
+                              f"CP {n['cp']} выше слабого звена: {weak['node_id']!r} "
+                              f"стоит на {low}",
+                              "цель не прочнее слабейшей зависимости: понизьте CP "
+                              f"до {low} или добудьте артефакт по {weak['node_id']!r}"))
+
     # --- зоны агентов против реестра ---
     # Зона, указывающая на несуществующий Нексус, не сработает никогда:
     # это остаток чужой конфигурации, а не защита.
