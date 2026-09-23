@@ -8,7 +8,6 @@ kind: empirical
 owner: Product Engineer
 scope: org
 captured_by: human
-confidence: 0.2
 sources: []
 updated: 2026-08-20
 ttl_days: 365

@@ -6,22 +6,24 @@
 ```yaml
 ---
 nexus: product
-node_id: f-billing-export        # ascii, нижний регистр, стабильный навсегда
-node_type: feature               # product | value-proposition | feature | interface | platform | service
-paf_step: 1                      # 1 идея · 4 фичи/банч · 7 исполнение
+node_id: f-billing-export         # ascii, нижний регистр, стабильный навсегда
+node_type: feature                # product | value-proposition | feature | interface | platform | service
+paf_step: 1                       # 1 идея · 4 фичи/банч · 7 исполнение
 sprint_phase: null
 kind: empirical
 owner: Product Engineer
-confidence: 0.3                  # 0.2–0.4 = допущение онбординга
-sources: ["onboarding:interview"]   # ОБЯЗАТЕЛЬНО. Пусто = workslop
+cp: 3                             # ступень 2..9 из SCHEMA/ladder.yaml: решение встречи; прогон против системы поднимет ступень
+change_rate: medium               # как часто объект менялся: high | medium | low | unknown
+# confidence инструмент ставит сам (cp/9) — руками его не пишут
+sources: ["onboarding:interview"] # ОБЯЗАТЕЛЬНО. Пусто = workslop
 updated: 2026-01-01
-ttl_days: 90
+ttl_days: 90                      # выводится из change_rate по SCHEMA/profiles.yaml
 ripeness: fresh
 title: Выгрузка счетов в 1С
-realizes: []                     # feature → value-proposition
-addresses: []                    # value-proposition → need
-depends_on: []                   # product → feature
-satisfies: []                    # → key-result, появляется после /paf-okr
+realizes: []                      # feature → value-proposition
+addresses: []                     # value-proposition → need
+depends_on: []                    # product → feature
+satisfies: []                     # → key-result, появляется после /paf-okr
 ---
 ```
 

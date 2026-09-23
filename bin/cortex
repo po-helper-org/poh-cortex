@@ -25,7 +25,7 @@ import sys
 import unicodedata
 from collections import Counter, defaultdict
 
-VERSION = "2.0.0"
+VERSION = "2.7.0"
 TODAY = datetime.date.today()
 
 # ──────────────────────────────────────────────────────────────────────────────

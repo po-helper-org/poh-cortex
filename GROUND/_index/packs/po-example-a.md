@@ -30,11 +30,6 @@ _Операционная модель: как принимаются решен
   Семь правил. Нарушение любого из них ловится гейтом или превращает память в документацию, которая гниёт.
   источник: GROUND/SCHEMA/, PAF Product Ops guide v22
 
-- **Нексус операционной модели** `ops-model-index`
-  spine · CP 9 · fresh · владелец Product Ops
-  Правила игры организации. Единственный Нексус, который приезжает из шаблона **заполненным**: это методология PAF/ops, а не ваш контекст.
-  источник: [S1], [S2]
-
 - **Принципы — методология PAF/ops** `ops-principles`
   operating-model · CP 9 · fresh · владелец Product Ops
   Приезжают из шаблона и трассируются до источников PAF ([S1] productframework.ru/ops/main, [S2] productframework.ru/ai_product_roles). Это то, чему следует ИИ-агент, работающий с эт…
@@ -45,30 +40,35 @@ _Операционная модель: как принимаются решен
   Базовое правило PAF: **система владеет исполнением и формой, человек владеет целью и решением**. Узлы этого vault отражают решения человека; артефакты исполнения живут там, где исп…
   источник: [S1], [S2]
 
+- **Нексус операционной модели** `ops-model-index`
+  spine · fresh · владелец Product Ops
+  Правила игры организации. Единственный Нексус, который приезжает из шаблона **заполненным**: это методология PAF/ops, а не ваш контекст.
+  источник: [S1], [S2]
+
 ## Ядро: остальное
 
 - **Нексус портфеля организации** `company-index`
-  spine · CP 2 · fresh · владелец Portfolio Manager
+  spine · fresh · владелец Portfolio Manager
   источник: —
 
 - **Нексус потребителя** `customer-index`
-  spine · CP 2 · fresh · владелец Product Engineer
+  spine · fresh · владелец Product Engineer
   источник: —
 
 - **Нексус системы роста** `growth-index`
-  spine · CP 2 · fresh · владелец Growth Engineer
+  spine · fresh · владелец Growth Engineer
   источник: —
 
 - **Нексус рынка** `market-index`
-  spine · CP 2 · fresh · владелец Portfolio Manager
+  spine · fresh · владелец Portfolio Manager
   источник: —
 
 - **Нексус продукта** `product-index`
-  spine · CP 2 · fresh · владелец Product Engineer
+  spine · fresh · владелец Product Engineer
   источник: —
 
 - **Нексус организационной структуры** `team-index`
-  spine · CP 2 · fresh · владелец Product Ops
+  spine · fresh · владелец Product Ops
   источник: —
 
 ---

@@ -7,17 +7,19 @@
 nexus: growth
 node_id: growth-partner-channel
 node_type: concept
-paf_step: 5                      # 5 система роста · 6 питчинг · 8 harvest
+paf_step: 5                       # 5 система роста · 6 питчинг · 8 harvest
 sprint_phase: null
 kind: empirical
 owner: Growth Engineer
-confidence: 0.3
+cp: 3                             # ступень 2..9 из SCHEMA/ladder.yaml: разговор с владельцем канала; цифры поднимут ступень
+change_rate: medium               # как часто объект менялся: high | medium | low | unknown
+# confidence инструмент ставит сам (cp/9) — руками его не пишут
 sources: ["onboarding:interview"]
 updated: 2026-01-01
-ttl_days: 60                     # рост протухает быстрее всего
+ttl_days: 60                      # выводится из change_rate по SCHEMA/profiles.yaml
 ripeness: fresh
 title: Канал — <название канала>
-based_on: []                     # на каком узле продукта держится
+based_on: []                      # на каком узле продукта держится
 ---
 ```
 
