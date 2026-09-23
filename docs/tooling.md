@@ -151,7 +151,7 @@ effective_cp    cp − распад(время × change_rate)
 |---|---|---|
 | `registry_drift` | error | папка Нексуса с узлами, не объявленная в реестре |
 | `unknown_node_type` | error | тип узла, не объявленный ни в схеме, ни в реестре |
-| `weakest_link_drift` | error | CP ставки выше слабейшей из её зависимостей |
+| `weakest_link_drift` | error | CP ставки выше слабейшей из её зависимостей; опечатка в `non_critical` |
 | `ripeness_drift` | warn | вычисляемое поле разошлось — нужен `cortex refresh` |
 | `unknown_agent` | warn | `captured_by` вне `SCHEMA/agents.yaml` |
 | `missing_provenance` | warn | узел без `captured_by`: не видно, кто записал |

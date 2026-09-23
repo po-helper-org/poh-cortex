@@ -649,7 +649,18 @@ def run_gate(cx: Cortex) -> list[Issue]:
         for n in cx.nodes:
             if n["node_type"] != "bet" or n["cp"] is None:
                 continue
-            deps = [by_id[d] for d in (n["depends_on"] or []) if d in by_id]
+            dep_ids = list(n["depends_on"] or [])
+            skip = list(n["non_critical"] or [])
+            # Опечатка в non_critical тихо ослабила бы потолок: зависимость
+            # осталась бы критической, а человек считал бы её исключённой.
+            for bad_id in [x for x in skip if x not in dep_ids]:
+                sev = _strict(cx, "weakest_link_drift", "ERROR")
+                if sev:
+                    add(Issue(sev, n.rel,
+                              f"non_critical: {bad_id!r} нет среди depends_on",
+                              "исключать из потолка можно только объявленную "
+                              "зависимость — проверьте написание node_id"))
+            deps = [by_id[d] for d in dep_ids if d in by_id and d not in skip]
             floors = [(d, cx.effective_cp(d)) for d in deps if cx.effective_cp(d) is not None]
             if not floors:
                 continue

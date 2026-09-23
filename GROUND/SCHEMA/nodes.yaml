@@ -10,7 +10,7 @@ required_keys: [nexus, node_id, node_type, kind, owner, sources, updated, ripene
 # Ключи смысла: не обязательны схемой, но именно они делают память пригодной
 # для решения. Их отсутствие видно в report, а не в гейте.
 meaning_keys: [cp, confidence, change_rate, scope, captured_by, ttl_days, status,
-               shared_with, aliases, disputed, contradicts, outcome, stage]
+               shared_with, aliases, disputed, contradicts, outcome, stage, non_critical]
 
 # Слой решений живёт по своим правилам: ставка и артефакт не принадлежат Нексусу,
 # у них другой жизненный цикл (артефакт не стареет, стареет знание о мире).

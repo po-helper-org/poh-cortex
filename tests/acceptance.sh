@@ -121,6 +121,7 @@ impact_metric: "число подключённых организаторов, 
 window: "до 15 ноября — иначе мимо сезона"
 satisfies: [$KR]
 depends_on: [raschety-s-organizatorom, katalog-meropriyatiy, vozvraty-i-otmeny]
+non_critical: []
 sources: ["OKR департамента"]
 captured_by: human
 updated: $(date +%F)
@@ -170,7 +171,8 @@ else
   bad "распад не сработал" "ripeness=$RIP effective_cp=$EFF (ждали wilting и < 6)"
 fi
 
-if C stale | grep -q "Возвраты"; then
+OUT=$(C stale)
+if printf '%s' "$OUT" | grep -q "Возвраты"; then
   ok "протухшее попало в очередь верификации"
 else
   bad "cortex stale не показал протухший узел"
@@ -178,10 +180,11 @@ fi
 
 echo
 echo "Что Кортекс считает за вас"
-if C gate | tail -1 | grep -q "зелёный"; then
+OUT=$(C gate)
+if printf '%s' "$OUT" | tail -1 | grep -q "зелёный"; then
   ok "ставка с CP 2 на зависимостях 3 · 6 · 2 — гейт зелёный"
 else
-  bad "гейт красный там, где ставка не превышает слабое звено" "$(C gate | tail -1)"
+  bad "гейт красный там, где ставка не превышает слабое звено" "$(printf '%s' "$OUT" | tail -1)"
 fi
 
 sed -i.bak 's/^cp: 2$/cp: 7/' "$VAULT/GROUND/DECIDE/bets/zapusk.md" && rm -f "$VAULT"/GROUND/DECIDE/bets/*.bak
@@ -192,6 +195,28 @@ else
   bad "CP ставки выше слабейшей зависимости прошёл гейт" "$(printf '%s' "$OUT" | tail -1)"
 fi
 sed -i.bak 's/^cp: 7$/cp: 2/' "$VAULT/GROUND/DECIDE/bets/zapusk.md" && rm -f "$VAULT"/GROUND/DECIDE/bets/*.bak
+
+# Побочная зависимость выносится из потолка явно — и только явно.
+sed -i.bak 's/^cp: 2$/cp: 3/; s/^non_critical: \[\]$/non_critical: [vozvraty-i-otmeny]/' \
+  "$VAULT/GROUND/DECIDE/bets/zapusk.md" && rm -f "$VAULT"/GROUND/DECIDE/bets/*.bak
+OUT=$(C gate)
+if printf '%s' "$OUT" | tail -1 | grep -q "зелёный"; then
+  ok "зависимость в non_critical потолок не держит: CP 3 при слабейшей 2 — гейт зелёный"
+else
+  bad "non_critical не исключает зависимость из потолка" "$(printf '%s' "$OUT" | tail -1)"
+fi
+
+# Опечатка в non_critical вернула бы зависимость в критические молча.
+sed -i.bak 's/^non_critical: \[vozvraty-i-otmeny\]$/non_critical: [vozvraty-i-otmen]/' \
+  "$VAULT/GROUND/DECIDE/bets/zapusk.md" && rm -f "$VAULT"/GROUND/DECIDE/bets/*.bak
+OUT=$(C gate)
+if printf '%s' "$OUT" | grep -q "нет среди depends_on"; then
+  ok "опечатка в non_critical поймана, а не проглочена"
+else
+  bad "опечатка в non_critical прошла молча" "$(printf '%s' "$OUT" | tail -1)"
+fi
+sed -i.bak 's/^non_critical: .*$/non_critical: []/; s/^cp: 3$/cp: 2/' \
+  "$VAULT/GROUND/DECIDE/bets/zapusk.md" && rm -f "$VAULT"/GROUND/DECIDE/bets/*.bak
 
 echo
 echo "Ради чего всё: на чём стоит цель"
