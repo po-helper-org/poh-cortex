@@ -11,16 +11,18 @@ paf_step: null
 sprint_phase: null
 kind: empirical
 owner: Product Ops
-confidence: 0.3                  # 0.3 = засеяно из roster, связи не подтверждены
-sources: ["config.yaml:roster"]  # или onboarding:interview, hr-system, self-reported
+cp: 3                             # ступень 2..9 из SCHEMA/ladder.yaml: засеяно из оргструктуры, связи не подтверждены
+change_rate: medium               # как часто объект менялся: high | medium | low | unknown
+# confidence инструмент ставит сам (cp/9) — руками его не пишут
+sources: ["config.yaml:roster"]   # или onboarding:interview, hr-system, self-reported
 updated: 2026-01-01
-ttl_days: 180                    # роли меняются реже рынка, чаще методологии
+ttl_days: 180                     # выводится из change_rate по SCHEMA/profiles.yaml
 ripeness: fresh
 title: Иван Иванов — Product Manager
 full_name: Иванов Иван Иванович
 role_title: Product Manager
 department: Продукт
-reports_to: null                 # node_id руководителя
+reports_to: null                  # node_id руководителя
 manages: []
 collaborates_with: []
 influence_zones: ["роадмап продукта", "приоритизация фич"]

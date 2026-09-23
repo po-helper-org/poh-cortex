@@ -5,20 +5,22 @@
 ```yaml
 ---
 nexus: market
-node_id: bet-enterprise-retail   # mkt-... рынок · competitor-... конкурент · bet-... Ставка
-node_type: concept               # concept | entity
+node_id: bet-enterprise-retail    # mkt-... рынок · competitor-... конкурент · bet-... Ставка
+node_type: concept                # concept | entity
 paf_step: 3
 sprint_phase: null
 kind: empirical
 owner: Portfolio Manager
-confidence: 0.2                  # без цифр рынка выше 0.4 не поднимать
+cp: 2                             # ступень 2..9 из SCHEMA/ladder.yaml: пересказ чужих слов — не выше второй
+change_rate: medium               # как часто объект менялся: high | medium | low | unknown
+# confidence инструмент ставит сам (cp/9) — руками его не пишут
 sources: ["analytics:отчёт-2026", "interview:партнёр"]
 updated: 2026-01-01
-ttl_days: 90
+ttl_days: 90                      # выводится из change_rate по SCHEMA/profiles.yaml
 ripeness: fresh
 title: Ставка — сети розницы федерального уровня
-based_on: []                     # на каком узле держится Ставка
-tags: [bet]                      # [bet] — элемент стратегического сценария
+based_on: []                      # на каком узле держится Ставка
+tags: [bet]                       # [bet] — элемент стратегического сценария
 ---
 ```
 

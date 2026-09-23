@@ -8,7 +8,6 @@ kind: normative
 owner: Product Ops
 scope: org
 captured_by: human
-confidence: 1.0
 sources: ["[S1]", "[S2]", "repo:poh-memory-engine"]
 updated: 2026-08-20
 ttl_days: 365
