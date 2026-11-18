@@ -21,7 +21,7 @@
 _Операционная модель: как принимаются решения в этой организации._
 
 - **Контракт агентов: кто считает, кто собирает, кто решает** `ops-agent-contract`
-  operating-model · CP 9 · fresh · владелец Product Ops
+  operating-model · CP 9 · ripening · владелец Product Ops
   Три класса агентов работают с этой памятью, и у каждого своя граница.
   источник: PAF Product Ops guide v22, П9, GROUND/SCHEMA/agents.yaml
 
