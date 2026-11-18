@@ -13,7 +13,7 @@ sources: ["PAF Product Ops guide v22, П9", GROUND/SCHEMA/agents.yaml]
 captured_by: human
 updated: 2026-09-22
 ttl_days: 90
-ripeness: fresh
+ripeness: ripening
 ---
 
 # Контракт агентов: кто считает, кто собирает, кто решает
