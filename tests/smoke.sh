@@ -30,6 +30,7 @@ check "свежесть пересчитана"         0 refresh --dry-run
 check "отчёт собирается"             0 report
 check "поиск отвечает"               0 ask продукт
 check "очередь читается"             0 intake list
+check "здоровье считается"           0 health --json
 check "зоны агентов видны"           0 agents
 check "сироты считаются"             0 gaps
 check "узел без источника отклонён"  2 node new --nexus product --type feature --title "Без источника"

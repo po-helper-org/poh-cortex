@@ -25,7 +25,7 @@ import sys
 import unicodedata
 from collections import Counter, defaultdict
 
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 TODAY = datetime.date.today()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -697,8 +697,29 @@ def run_gate(cx: Cortex) -> list[Issue]:
             add(Issue("ERROR", n.rel, "frontmatter не разбирается"))
             continue
         is_index = n.path.stem in ("_index", "_registry")
+        if n.layer == "intake":
+            # Очередь — единственная зона сборщиков, и проверяется она тем же
+            # правилом, что и знание: кто принёс и вправе ли класть именно сюда.
+            # Без этого бот, положивший запись в каталог чужого профиля или
+            # не подписавший её, проходил гейт молча.
+            cb = n["captured_by"]
+            if not cb:
+                sev = _strict(cx, "intake_provenance", "WARN")
+                if sev:
+                    add(Issue(sev, n.rel, "запись очереди без captured_by — не видно, кто её принёс",
+                              "сборщик подписывает запись: captured_by: <агент из SCHEMA/agents.yaml>"))
+                continue
+            if cb not in known_agents and not str(cb).startswith(("human", "po:", "profile:")):
+                sev = _strict(cx, "unknown_agent", "WARN")
+                if sev:
+                    add(Issue(sev, n.rel, f"captured_by {cb!r} не объявлен в SCHEMA/agents.yaml"))
+            z = zones.get(cb)
+            if z and z["may_write"] and not _allowed(n.rel, z["may_write"]):
+                add(Issue("ERROR", n.rel, f"сборщик {cb!r} положил запись в чужую очередь",
+                          f"его зона: {', '.join(z['may_write'])}"))
+            continue
         if n.layer not in ("curated", "decisions"):
-            continue  # PULSE и _intake живут в своих форматах, Node schema к ним не применяется
+            continue  # PULSE живёт в своих форматах, Node schema к нему не применяется
 
         nt = n["node_type"]
         for k in cx.required_keys(nt, n.layer):
@@ -1228,13 +1249,11 @@ def cmd_stale(cx: Cortex, a):
     return 0
 
 
-def cmd_gaps(cx: Cortex, a):
-    """Узлы, не достижимые от хребта целей: технически валидны, ни на что не влияют."""
+def _orphans(cx: Cortex):
+    """(достижимые от целей id, сироты) — или (None, []) при пустом хребте."""
     spine = {n.id for n in cx.nodes if n["node_type"] in ("objective", "key-result")}
     if not spine:
-        print(ylw("хребет целей пуст — достижимость не считается"))
-        print(dim("  заведите цели квартала: ROADMAP/kr-epic-map.md"))
-        return 0
+        return None, []
     reach, frontier = set(spine), list(spine)
     incoming = defaultdict(set)
     for n in cx.nodes:
@@ -1251,6 +1270,16 @@ def cmd_gaps(cx: Cortex, a):
                 frontier.append(src)
     orphans = [n for n in cx.nodes if n.layer == "curated" and n.id and n.id not in reach
                and n["node_type"] not in ("spine", "operating-model")]
+    return reach, orphans
+
+
+def cmd_gaps(cx: Cortex, a):
+    """Узлы, не достижимые от хребта целей: технически валидны, ни на что не влияют."""
+    reach, orphans = _orphans(cx)
+    if reach is None:
+        print(ylw("хребет целей пуст — достижимость не считается"))
+        print(dim("  заведите цели квартала: ROADMAP/kr-epic-map.md"))
+        return 0
     print(bold(f"Достижимо от целей: {len(reach)} · сирот: {len(orphans)}"))
     for n in orphans[:a.top]:
         print(f"  {dim('○')} {n.title[:56]:56} {dim(n.rel)}")
@@ -1706,6 +1735,15 @@ def cmd_pack(cx: Cortex, a):
         for one in cx.profiles():
             a.as_profile, a.all = one, False
             rc |= cmd_pack(cx, a)
+        # Срез удалённого или переименованного профиля остался бы лежать, и
+        # профиль, читающий файл по старому имени, получал бы память, которую
+        # больше никто не пересобирает. Чистим только каталог по умолчанию.
+        packs = cx.ground / "_index" / "packs"
+        if not getattr(a, "out", None) and not getattr(a, "stdout", False) and packs.is_dir():
+            for f in sorted(packs.glob("*.md")):
+                if f.stem not in cx.profiles():
+                    f.unlink()
+                    print(ylw(f"✓ удалён срез профиля, которого больше нет: {f.relative_to(cx.root)}"))
         return rc
     pid = active_profile(cx, a.as_profile)
     if not pid:
@@ -1853,21 +1891,60 @@ def cmd_pack(cx: Cortex, a):
     return 0
 
 
-def _intake_age(cx: Cortex):
-    """Сколько лежит неразобранное. Очередь без ритма превращается в свалку."""
+_LEAD_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+
+
+def _entry_date(f: pathlib.Path) -> datetime.date:
+    """Когда запись попала в очередь — по самой записи, а не по файлу.
+
+    Время изменения файла сбрасывается каждым клоном, восстановлением из
+    резервной копии и переносом сервера: после них вся очередь выглядит
+    вчерашней, и просрочка разбора пропадает из повестки. Поэтому порядок такой:
+    поле date во frontmatter → дата в начале имени файла → самая ранняя дата в
+    строках inbox.md (формат «ГГГГ-ММ-ДД | …») → и только потом время файла."""
+    try:
+        text = f.read_text(encoding="utf-8")
+    except Exception:
+        text = ""
+    m = FM_RE.match(text)
+    if m:
+        try:
+            d = as_date((yaml_parse(m.group(1)) or {}).get("date"))
+        except Exception:
+            d = None
+        if d:
+            return d
+    m = _LEAD_DATE.match(f.name)
+    if m:
+        d = as_date(m.group(1))
+        if d:
+            return d
+    dates = [as_date(x.group(1)) for x in (_LEAD_DATE.match(ln.strip()) for ln in text.splitlines()) if x]
+    dates = [d for d in dates if d]
+    if dates:
+        return min(dates)
+    return datetime.date.fromtimestamp(f.stat().st_mtime)
+
+
+def _intake_files(cx: Cortex) -> list[pathlib.Path]:
     d = cx.ground / "_intake"
     if not d.is_dir():
-        return 0, None
-    files = [f for f in d.rglob("*.md") if f.name not in ("README.md", "inbox.md")]
+        return []
+    files = [f for f in d.rglob("*.md") if f.name not in ("README.md", "inbox.md", "_template.md")]
     inbox = d / "inbox.md"
     if inbox.exists() and len([x for x in inbox.read_text(encoding="utf-8").splitlines()
                                if x.strip() and not x.startswith(("#", "-", ">"))]) > 3:
         files.append(inbox)
+    return files
+
+
+def _intake_age(cx: Cortex):
+    """Сколько лежит неразобранное. Очередь без ритма превращается в свалку."""
+    files = _intake_files(cx)
     if not files:
         return 0, None
-    oldest = min(files, key=lambda f: f.stat().st_mtime)
-    age = (datetime.datetime.now() - datetime.datetime.fromtimestamp(oldest.stat().st_mtime)).days
-    return len(files), age
+    oldest = min(_entry_date(f) for f in files)
+    return len(files), max(0, (TODAY - oldest).days)
 
 
 def _same_object(a_node: Node, b_node: Node) -> float:
@@ -2179,7 +2256,7 @@ def cmd_agenda(cx: Cortex, a):
 
     drafts = [n for n in cx.nodes if n["status"] == "draft"]
     if pid:
-        drafts = [n for n in drafts if str(n["captured_by"]) == f"profile:{pid}"] or drafts
+        drafts = [n for n in drafts if str(n["captured_by"]) in (f"profile:{pid}", f"hermes:{pid}")] or drafts
     if drafts:
         lines.append((ylw("●"), f"ждёт вашей приёмки: {len(drafts)} узлов", "cortex review"))
 
@@ -2225,6 +2302,105 @@ def cmd_agenda(cx: Cortex, a):
         print(dim(f"      {act}"))
     print(dim("\n  это пять минут в день: прочитать список и решить, что делаете вы, "
               "а что подождёт"))
+    return 0
+
+
+def _pack_is_current(cx: Cortex, pid: str) -> tuple[bool, int]:
+    """Совпадает ли лежащий срез с тем, что собрала бы память сейчас."""
+    import contextlib
+    import io
+    f = cx.ground / "_index" / "packs" / f"{pid}.md"
+    if not f.exists():
+        return False, 0
+    ns = argparse.Namespace(as_profile=pid, all=False, json=False, stdout=True, out=None,
+                            core_limit=40, seam_limit=15, budget=60000)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cmd_pack(cx, ns)
+    fresh = buf.getvalue()
+    have = f.read_text(encoding="utf-8")
+    return fresh.rstrip("\n") == have.rstrip("\n"), len(have)
+
+
+def health(cx: Cortex, queue_days: int = 3, queue_crit: int = 7, drafts_warn: int = 60) -> dict:
+    """Числа здоровья памяти — для монитора и повестки. Только чтение."""
+    issues = run_gate(cx)
+    errors = sum(1 for i in issues if i.sev == "ERROR")
+    warnings = sum(1 for i in issues if i.sev == "WARN")
+
+    files = _intake_files(cx)
+    oldest = max(((TODAY - _entry_date(f)).days for f in files), default=None)
+    by_source = Counter((f.relative_to(cx.ground / "_intake").parts[:-1] or ("(корень)",))[-1]
+                        for f in files)
+
+    drafts = [n for n in cx.nodes if n["status"] == "draft"]
+    curated = [n for n in cx.nodes if n.layer == "curated" and n.id
+               and n.path.stem not in ("_index", "_registry") and n["status"] != "rejected"]
+    zones = defaultdict(lambda: [0, 0])
+    for n in curated:
+        z = zones[cx.scope_of(n) or "org"]
+        z[1] += 1
+        if cx.ripeness_of(n)[0] == "wilting":
+            z[0] += 1
+    wilting = sum(z[0] for z in zones.values())
+    reach, orphans = _orphans(cx)
+    conflicts = [c for c in _conflicts(cx) if not (c[1]["disputed"] or c[2]["disputed"])]
+    packs = {}
+    for pid in cx.profiles():
+        current, size = _pack_is_current(cx, pid)
+        packs[pid] = {"current": current, "chars": size}
+
+    alerts = []
+    if errors:
+        alerts.append({"level": "crit", "what": "gate", "text": f"память сломана: {errors} ошибок гейта"})
+    if oldest is not None and oldest > queue_crit:
+        alerts.append({"level": "crit", "what": "intake", "text": f"очередь не разбирается: самой старой {oldest} дн."})
+    elif oldest is not None and oldest > queue_days:
+        alerts.append({"level": "warn", "what": "intake", "text": f"очередь просрочена: самой старой {oldest} дн."})
+    if len(drafts) > drafts_warn:
+        alerts.append({"level": "warn", "what": "drafts", "text": f"ждёт приёмки {len(drafts)} черновиков"})
+    stale_packs = [p for p, v in packs.items() if not v["current"]]
+    if stale_packs:
+        alerts.append({"level": "warn", "what": "packs", "text": "срез отстал от памяти: " + ", ".join(stale_packs)})
+
+    return {
+        "version": VERSION, "date": str(TODAY),
+        "status": "crit" if any(x["level"] == "crit" for x in alerts) else ("warn" if alerts else "ok"),
+        "gate": {"errors": errors, "warnings": warnings},
+        "intake": {"count": len(files), "oldest_days": oldest, "by_source": dict(by_source)},
+        "drafts": {"count": len(drafts),
+                   "by_captured_by": dict(Counter(str(n["captured_by"] or "—") for n in drafts))},
+        "wilting": {"count": wilting, "nodes": len(curated),
+                    "share": round(wilting / len(curated), 3) if curated else 0.0,
+                    "by_scope": {k: {"wilting": v[0], "nodes": v[1]} for k, v in sorted(zones.items())}},
+        "orphans": None if reach is None else len(orphans),
+        "conflicts": len(conflicts),
+        "packs": packs,
+        "alerts": alerts,
+    }
+
+
+def cmd_health(cx: Cortex, a):
+    """Здоровье памяти числами: для монитора, алертов и недельной сводки."""
+    h = health(cx, a.queue_days, a.queue_crit, a.drafts_warn)
+    if a.json:
+        print(json.dumps(h, ensure_ascii=False, indent=2))
+        return 0
+    mark = {"ok": grn("● в норме"), "warn": ylw("● есть что сделать"), "crit": red("● требует действия")}
+    print(bold("Здоровье памяти") + "  " + mark[h["status"]])
+    print(f"  гейт            ошибок {h['gate']['errors']} · предупреждений {h['gate']['warnings']}")
+    q = h["intake"]
+    print(f"  очередь         {q['count']} записей" +
+          (f", самой старой {q['oldest_days']} дн." if q["oldest_days"] is not None else ""))
+    print(f"  черновики       {h['drafts']['count']}")
+    w = h["wilting"]
+    print(f"  протухло        {w['count']} из {w['nodes']} узлов")
+    print(f"  сироты          {'хребет целей пуст' if h['orphans'] is None else h['orphans']}")
+    print(f"  расхождения     {h['conflicts']}")
+    for pid, v in h["packs"].items():
+        print(f"  срез {pid:10} {'актуален' if v['current'] else ylw('отстал или нет')} · {v['chars']} символов")
+    for x in h["alerts"]:
+        print((red if x["level"] == "crit" else ylw)(f"  ! {x['text']}"))
     return 0
 
 
@@ -2454,6 +2630,14 @@ def main(argv=None):
     p = add("agenda", cmd_agenda, "пять минут в день: что требует внимания")
     p.add_argument("--queue-days", dest="queue_days", type=int, default=3,
                    help="через сколько дней очередь считается просроченной")
+    p.add_argument("--json", action="store_true")
+    p = add("health", cmd_health, "здоровье памяти числами: для монитора и алертов")
+    p.add_argument("--queue-days", dest="queue_days", type=int, default=3,
+                   help="после скольких дней очередь просрочена (warn)")
+    p.add_argument("--queue-crit", dest="queue_crit", type=int, default=7,
+                   help="после скольких дней очередь не разбирается (crit)")
+    p.add_argument("--drafts-warn", dest="drafts_warn", type=int, default=60,
+                   help="сколько черновиков ждут приёмки до предупреждения")
     p.add_argument("--json", action="store_true")
     p = add("pack", cmd_pack, "собрать срез памяти под профиль")
     p.add_argument("--out")

@@ -152,6 +152,46 @@ refuses "Нексус, не объявленный в реестре, не пр�
         "не объявлен|нет в реестре|Нексус" -- \
         node new --nexus nosuchnexus --type system --title X --source y
 
+# Очередь — единственная зона сборщиков. Бот профиля a не кладёт запись в
+# очередь профиля b, а неподписанная запись видна, а не проходит молча.
+python3 - "$VAULT/GROUND/SCHEMA/agents.yaml" <<'PY'
+import sys
+p = sys.argv[1]; t = open(p, encoding="utf-8").read()
+t = t.replace("agents:\n", 'agents:\n  - {id: "hermes:accept-a", class: collector, may_write: ["GROUND/_intake/hermes/a/**"]}\n', 1)
+open(p, "w", encoding="utf-8").write(t)
+PY
+mkdir -p "$VAULT/GROUND/_intake/hermes/a" "$VAULT/GROUND/_intake/hermes/b"
+printf -- '---\ncaptured_by: hermes:accept-a\ndate: 2020-01-01\n---\n"чужая очередь"\n' \
+  > "$VAULT/GROUND/_intake/hermes/b/2020-01-01-x.md"
+OUT=$(C gate)
+if printf '%s' "$OUT" | grep -q "положил запись в чужую очередь"; then
+  ok "сборщик не кладёт запись в очередь чужого профиля"
+else
+  bad "запись сборщика в чужую очередь прошла гейт" "$(printf '%s' "$OUT" | tail -1)"
+fi
+rm -f "$VAULT/GROUND/_intake/hermes/b/2020-01-01-x.md"
+printf -- '---\ndate: 2026-01-01\n---\n"без подписи"\n' > "$VAULT/GROUND/_intake/hermes/a/2026-01-01-y.md"
+OUT=$(C gate --all)
+if printf '%s' "$OUT" | grep -q "без captured_by"; then
+  ok "запись очереди без подписи видна в гейте"
+else
+  bad "неподписанная запись очереди прошла молча" "$(printf '%s' "$OUT" | tail -1)"
+fi
+rm -f "$VAULT/GROUND/_intake/hermes/a/2026-01-01-y.md"
+
+# Возраст очереди — по дате записи. Клон и восстановление сбрасывают время
+# файлов, и очередь трёхнедельной давности выглядела бы вчерашней.
+printf -- '---\ncaptured_by: hermes:accept-a\ndate: 2020-01-01\n---\n"давняя запись"\n' \
+  > "$VAULT/GROUND/_intake/hermes/a/zapis.md"
+touch "$VAULT/GROUND/_intake/hermes/a/zapis.md"
+AGE=$(C health --json | python3 -c "import json,sys; print(json.load(sys.stdin)['intake']['oldest_days'])" 2>/dev/null)
+if [ -n "$AGE" ] && [ "$AGE" != "None" ] && [ "$AGE" -gt 1000 ]; then
+  ok "возраст очереди считается по дате записи, а не по файлу: $AGE дн."
+else
+  bad "возраст очереди взят по времени файла" "oldest_days=$AGE (ждали > 1000)"
+fi
+rm -f "$VAULT/GROUND/_intake/hermes/a/zapis.md"
+
 echo
 echo "Что Кортекс делает"
 accepts "та же ступень с артефактом — принимается" -- \

@@ -18,5 +18,6 @@ checks:
   ripeness_drift: warn        # вычисляемое поле разошлось — нужен cortex refresh
   unknown_agent: warn         # captured_by вне SCHEMA/agents.yaml
   missing_provenance: warn    # узел без captured_by: не видно, кто записал
+  intake_provenance: warn     # запись очереди с frontmatter без captured_by; там, где пишут боты, — error
   agent_zone_drift: warn      # зона агента ссылается на несуществующий Нексус
   weakest_link_drift: error   # CP ставки выше слабейшей из её зависимостей
