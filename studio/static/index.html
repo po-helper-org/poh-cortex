@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Студия Кортекса</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/"><img src="icon.svg" alt="" width="22" height="22"><b>Кортекс</b><span class="muted" id="org">память организации</span></a>
+  <nav class="tabs" aria-label="Разделы">
+    <a href="#/" data-tab="book">Книга</a>
+    <a href="#/queue" data-tab="queue">Разбор <span class="pill" id="queue-count" hidden></span></a>
+    <a href="#/journal" data-tab="journal">Журнал</a>
+    <a href="#/health" data-tab="health">Здоровье</a>
+  </nav>
+  <button class="theme" id="theme" type="button" title="Тема" aria-label="Сменить тему"><span class="dot"></span></button>
+</header>
+<div class="layout">
+  <aside class="side">
+    <form id="search" role="search"><input id="q" type="search" placeholder="Поиск по Кортексу" autocomplete="off" aria-label="Поиск"></form>
+    <a class="attention" href="#/queue" id="attention" hidden>Требует внимания <span class="pill warn" id="attention-n"></span></a>
+    <nav id="toc" aria-label="Главы"></nav>
+  </aside>
+  <main id="main" tabindex="-1"><p class="muted">Загрузка…</p></main>
+</div>
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
