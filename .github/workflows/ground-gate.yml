@@ -41,5 +41,9 @@ jobs:
       - name: Сравнение «до Кортекса и после»
         run: tests/comparison.sh
 
+      # Студия (bin/cortex serve): API, потолки CP, приёмка, коммит только затронутых файлов.
+      - name: Студия
+        run: python3 -m unittest discover -s tests
+
       - name: Отчёт
         run: bin/cortex report

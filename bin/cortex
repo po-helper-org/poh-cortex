@@ -7,7 +7,7 @@
 новый агент расширяет память декларацией, а не правкой инструмента.
 
   cortex doctor | gate | refresh | report | ask | context | who | stale | gaps
-  cortex node new|check|set | intake list|route | agents | init
+  cortex node new|check|set | intake list|route | agents | init | serve
 
 Носитель истины — markdown в git. Индекс строится в памяти на каждый запуск
 (422 узла ≈ 0.2 c) и не хранится: производный артефакт не бывает истиной.
@@ -25,7 +25,7 @@ import sys
 import unicodedata
 from collections import Counter, defaultdict
 
-VERSION = "2.8.0"
+VERSION = "2.9.0"
 TODAY = datetime.date.today()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2532,6 +2532,19 @@ def cmd_init(cx: Cortex, a):
 
 # ──────────────────────────────────────────────────────────────────────────────
 
+def cmd_serve(cx: Cortex, a):
+    """Студия Кортекса — визуальный сервис памяти (studio/, docs/studio.md). Только стандартная библиотека."""
+    tool = pathlib.Path(__file__).resolve().parent.parent
+    if not (tool / "studio" / "server.py").exists():
+        die("студии нет рядом с инструментом: ожидался каталог studio/ — поставьте poh-cortex целиком")
+    sys.path.insert(0, str(tool))
+    from studio.server import serve
+    owners = [o for o in (a.owners or os.environ.get("CORTEX_STUDIO_OWNERS", "")).split(",") if o.strip()]
+    return serve(cx.root, host=a.host, port=a.port, read_only=a.read_only, owners=owners,
+                 user_header=a.user_header or os.environ.get("CORTEX_STUDIO_USER_HEADER", ""),
+                 commit=a.commit, base=a.base)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="cortex", description="Кортекс: память организации для ИИ-агентов PO")
     ap.add_argument("--root", help="корень vault (по умолчанию ищется вверх по дереву)")
@@ -2665,6 +2678,17 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p = add("schema", cmd_schema, "схема памяти: показать или завести свою")
     p.add_argument("action", choices=["show", "init"], nargs="?", default="show")
+    p = add("serve", cmd_serve, "Студия: книга памяти, разбор очереди и журнал в браузере")
+    p.add_argument("--host", default="127.0.0.1", help="адрес (по умолчанию только этот компьютер)")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--read-only", dest="read_only", action="store_true", help="без записи")
+    p.add_argument("--owners", help="кто может принимать знание: имена входа через запятую "
+                                    "(или CORTEX_STUDIO_OWNERS)")
+    p.add_argument("--user-header", dest="user_header",
+                   help="заголовок с именем входа от прокси, например X-Forwarded-User "
+                        "(или CORTEX_STUDIO_USER_HEADER)")
+    p.add_argument("--commit", action="store_true", help="коммитить каждое решение в git (только затронутые файлы)")
+    p.add_argument("--base", default="", help="префикс адреса за прокси, например /cortex")
     p = add("init", cmd_init, "привязать vault к организации")
     for name, env, prompt, _key in INIT_FIELDS:
         p.add_argument(f"--{name}", help=f"{prompt} (или {env})")
