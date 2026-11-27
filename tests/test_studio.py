@@ -253,6 +253,21 @@ class Studio(unittest.TestCase):
         self.assertEqual(code, 403)
         self.assertEqual(r["error"], "csrf")
 
+    def test_refused_post_body_does_not_leak_into_next_request(self):
+        import http.client
+        self.start(read_only=True)
+        conn = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=10)
+        conn.request("POST", "/api/queue/000000000000/reject", body=b'{"reason": "x"}',
+                     headers={"Content-Type": "application/json", "X-Cortex-Studio": "1"})
+        r = conn.getresponse()
+        r.read()
+        self.assertEqual(r.status, 403)
+        conn.request("GET", "/api/me")   # то же соединение: остаток тела не должен стать запросом
+        r = conn.getresponse()
+        self.assertEqual(r.status, 200)
+        self.assertIn("can_write", json.loads(r.read()))
+        conn.close()
+
     def test_read_only(self):
         self.start(read_only=True)
         relay = self.item("relay")

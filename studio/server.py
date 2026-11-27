@@ -166,15 +166,20 @@ def make_handler(cfg: Settings, quiet: bool = False):
         def do_POST(self):
             path, _ = self._path()
             try:
+                # тело дочитывается до любых отказов: иначе на keep-alive его остаток станет «следующим запросом»
+                try:
+                    size = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    size = -1
+                if size < 0 or size > BODY_LIMIT:
+                    self.close_connection = True
+                    raise Refused(413, "too_large", "запрос больше 64 КБ")
+                raw = self.rfile.read(size) if size else b"{}"
                 if self.headers.get("X-Cortex-Studio") != "1":
                     raise Refused(403, "csrf", "нет заголовка X-Cortex-Studio")
                 ok, why = cfg.may_write(self.headers)
                 if not ok:
                     raise Refused(403, "read_only", why)
-                size = int(self.headers.get("Content-Length") or 0)
-                if size > BODY_LIMIT:
-                    raise Refused(413, "too_large", "запрос больше 64 КБ")
-                raw = self.rfile.read(size) if size else b"{}"
                 try:
                     body = json.loads(raw or b"{}")
                 except ValueError:
